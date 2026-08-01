@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotutor"
+version = "1.0.0"
+description = "Offline-first Japanese listening practice generator with furigana, Chinese translation and MP3 export"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["japanese", "jlpt", "tts", "furigana", "language-learning", "listening"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Education",
+    "Natural Language :: Japanese",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Education",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "pyopenjtalk-plus>=0.4.1",
+    "numpy>=1.24",
+    "lameenc>=1.7.0",
+    "pykakasi>=2.2.1",
+]
+
+[project.optional-dependencies]
+online = ["edge-tts>=6.1.0"]
+accurate-readings = ["fugashi>=1.3", "unidic-lite>=1.0.8"]
+dev = ["pytest>=8.0", "pyinstaller>=6.6"]
+
+[project.scripts]
+autotutor = "autotutor.app:main"
+
+[project.gui-scripts]
+autotutor-gui = "autotutor.app:main"
+
+[tool.setuptools]
+packages = ["autotutor", "autotutor.content", "autotutor.tts", "autotutor.ui"]
+
+[tool.setuptools.package-data]
+autotutor = ["data/corpus/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

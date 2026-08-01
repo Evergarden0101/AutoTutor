@@ -1,0 +1,240 @@
+"""Audio containers, narration and the exporters."""
+
+from __future__ import annotations
+
+import wave
+
+import pytest
+
+from autotutor.config import Settings
+from autotutor.content import generate_lesson
+from autotutor.export import (
+    export_bundle,
+    lesson_to_html,
+    lesson_to_srt,
+    lesson_to_text,
+    _srt_timestamp,
+)
+from autotutor.models import GenerationRequest, Lesson, RubySegment, Sentence
+from autotutor.tts import Narrator, SentenceTiming, available_engines, get_engine
+from autotutor.tts.audio import (
+    Mp3Clip,
+    PcmClip,
+    UnsupportedFormat,
+    concat,
+    encode_mp3,
+    mp3_available,
+    silence_like,
+    write_clip,
+)
+
+
+@pytest.fixture
+def settings(tmp_path):
+    settings = Settings()
+    settings.allow_online = False
+    settings.output_dir = str(tmp_path / "out")
+    return settings
+
+
+@pytest.fixture
+def lesson(settings):
+    return generate_lesson(
+        GenerationRequest(level="N5", topic="daily_life", length="short", seed=11),
+        settings,
+    )
+
+
+class TestPcmClip:
+    def test_duration(self):
+        clip = PcmClip(b"\x00\x00" * 16000, 16000)
+        assert clip.duration == pytest.approx(1.0)
+
+    def test_silence(self):
+        clip = PcmClip.silence(500, 8000)
+        assert clip.duration == pytest.approx(0.5)
+        assert set(clip.data) == {0}
+
+    def test_empty(self):
+        assert PcmClip(b"", 16000).is_empty
+
+    def test_wav_round_trip(self, tmp_path):
+        clip = PcmClip(b"\x01\x02" * 1000, 22050)
+        path = write_clip(clip, tmp_path / "a.wav")
+        with wave.open(str(path), "rb") as handle:
+            assert handle.getnchannels() == 1
+            assert handle.getsampwidth() == 2
+            assert handle.getframerate() == 22050
+            assert handle.getnframes() == 1000
+
+    def test_concat(self):
+        a = PcmClip(b"\x00\x00" * 100, 16000)
+        b = PcmClip(b"\x00\x00" * 50, 16000)
+        assert concat([a, b]).duration == pytest.approx(a.duration + b.duration)
+
+    def test_concat_rejects_mixed_sample_rates(self):
+        from autotutor.tts.audio import AudioError
+
+        with pytest.raises(AudioError):
+            concat([PcmClip(b"\x00\x00", 16000), PcmClip(b"\x00\x00", 24000)])
+
+    def test_concat_of_nothing(self):
+        assert concat([]) is None
+        assert concat([PcmClip(b"", 16000)]) is None
+
+    def test_silence_like_matches_container(self):
+        assert isinstance(silence_like(PcmClip(b"", 16000), 100), PcmClip)
+        assert isinstance(silence_like(Mp3Clip(b"x"), 100), Mp3Clip)
+
+
+@pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+class TestMp3:
+    def test_encode_produces_a_valid_frame_header(self):
+        data = encode_mp3(b"\x00\x00" * 24000, 24000, 128)
+        assert len(data) > 500
+        assert data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xfa") or data[:3] == b"ID3"
+
+    def test_write_mp3(self, tmp_path):
+        clip = PcmClip(b"\x00\x00" * 24000, 24000)
+        path = write_clip(clip, tmp_path / "a.mp3", 96)
+        assert path.exists() and path.stat().st_size > 500
+
+    def test_mp3_clip_cannot_export_wav(self, tmp_path):
+        with pytest.raises(UnsupportedFormat):
+            write_clip(Mp3Clip(b"\xff\xfb\x00"), tmp_path / "a.wav")
+
+    def test_unknown_extension(self, tmp_path):
+        with pytest.raises(UnsupportedFormat):
+            write_clip(PcmClip(b"\x00\x00", 16000), tmp_path / "a.ogg")
+
+
+class TestEngines:
+    def test_registry_is_complete(self):
+        for engine_id in ("openjtalk", "sapi5", "edge"):
+            engine = get_engine(engine_id)
+            assert engine is not None and engine.id == engine_id
+            assert engine.name and engine.description
+
+    def test_unknown_engine(self):
+        assert get_engine("nope") is None
+
+    def test_unavailable_engines_explain_why(self):
+        for engine in (get_engine("openjtalk"), get_engine("sapi5"), get_engine("edge")):
+            if not engine.available():
+                assert engine.unavailable_reason()
+
+    def test_offline_filter_excludes_network_engines(self):
+        assert all(not e.requires_network for e in available_engines(allow_online=False))
+
+
+@pytest.mark.skipif(
+    not get_engine("openjtalk").available(), reason="pyopenjtalk not installed"
+)
+class TestNarration:
+    def test_narrate_produces_audio_and_timings(self, settings, lesson):
+        result = Narrator(settings).narrate(lesson)
+        assert result.clip is not None
+        assert result.engine_id == "openjtalk"
+        assert result.duration > 3
+        assert result.has_timings
+        assert len(result.timings) == len(lesson.sentences)
+
+    def test_timings_are_ordered_and_inside_the_clip(self, settings, lesson):
+        result = Narrator(settings).narrate(lesson)
+        previous_end = 0.0
+        for timing in result.timings:
+            assert timing.start >= previous_end - 1e-6
+            assert timing.end > timing.start
+            previous_end = timing.end
+        assert previous_end <= result.duration + 1e-6
+
+    def test_progress_callback_runs(self, settings, lesson):
+        seen = []
+        Narrator(settings).narrate(lesson, progress=lambda d, t: seen.append((d, t)))
+        assert seen and seen[-1][0] == seen[-1][1] == len(lesson.sentences)
+
+    def test_cancellation_stops_early(self, settings, lesson):
+        import threading
+
+        cancel = threading.Event()
+        cancel.set()
+        result = Narrator(settings).narrate(lesson, cancel=cancel)
+        assert result.cancelled
+
+    def test_engine_resolution_falls_back_when_offline(self, settings):
+        settings.tts_engine = "edge"
+        settings.allow_online = False
+        engine, warnings = Narrator(settings).resolve_engine()
+        assert engine is not None and not engine.requires_network
+        assert warnings
+
+
+class TestTextExports:
+    def test_text_export_has_every_section(self, lesson):
+        text = lesson_to_text(lesson)
+        for marker in ["【日本語（ふりがな付き）】", "【かな だけ / 仅假名】",
+                       "【中文翻译】", "【単語 / 生词】"]:
+            assert marker in text
+        assert lesson.sentences[0].kana in text
+
+    def test_html_export_uses_real_ruby(self, lesson):
+        html = lesson_to_html(lesson)
+        assert "<ruby>" in html and "<rt>" in html
+        assert html.lstrip().startswith("<!DOCTYPE html>")
+        assert "prefers-color-scheme" in html
+
+    def test_html_escapes_content(self):
+        lesson = Lesson(
+            title_ja="<script>x</script>",
+            sentences=[Sentence(ja="あ", zh="<b>bold</b>", ruby=[RubySegment("あ")])],
+        )
+        html = lesson_to_html(lesson)
+        assert "<script>x</script>" not in html
+        assert "&lt;b&gt;bold&lt;/b&gt;" in html
+
+    def test_srt_timestamps(self):
+        assert _srt_timestamp(0) == "00:00:00,000"
+        assert _srt_timestamp(3661.5) == "01:01:01,500"
+        assert _srt_timestamp(-4) == "00:00:00,000"
+
+    def test_srt_body(self, lesson):
+        timings = [SentenceTiming(i, i * 2.0, i * 2.0 + 1.5)
+                   for i in range(len(lesson.sentences))]
+        srt = lesson_to_srt(lesson, timings)
+        assert srt.startswith("1\n00:00:00,000 --> 00:00:01,500")
+        assert lesson.sentences[0].ja in srt
+
+    def test_srt_ignores_out_of_range_timings(self, lesson):
+        srt = lesson_to_srt(lesson, [SentenceTiming(999, 0.0, 1.0)])
+        assert srt.strip() == ""
+
+
+class TestBundle:
+    def test_bundle_without_audio(self, lesson, tmp_path):
+        result = export_bundle(lesson, tmp_path, include_srt=False, include_json=True)
+        names = sorted(p.suffix for p in result.files)
+        assert names == [".html", ".json", ".txt"]
+        assert all(p.exists() and p.stat().st_size > 0 for p in result.files)
+
+    def test_bundle_warns_when_timings_are_missing(self, lesson, tmp_path):
+        result = export_bundle(lesson, tmp_path, include_srt=True, timings=None)
+        assert any("字幕" in w for w in result.warnings)
+
+    @pytest.mark.skipif(
+        not get_engine("openjtalk").available(), reason="pyopenjtalk not installed"
+    )
+    def test_full_bundle(self, settings, lesson, tmp_path):
+        narration = Narrator(settings).narrate(lesson)
+        result = export_bundle(
+            lesson, tmp_path, clip=narration.clip, timings=narration.timings,
+            stem="lesson", include_json=True,
+        )
+        suffixes = sorted(p.suffix for p in result.files)
+        assert suffixes == [".html", ".json", ".mp3", ".srt", ".txt"]
+        assert not result.warnings
+        assert (tmp_path / "lesson.mp3").stat().st_size > 5000
+
+    def test_slug_is_filesystem_safe(self, lesson):
+        slug = lesson.slug()
+        assert not set(slug) & set('\\/:*?"<>| ')
+        assert slug.startswith("AutoTutor_")

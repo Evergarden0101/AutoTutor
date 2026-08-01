@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.venv*/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Generated assets (regenerate with `python assets/make_icon.py`)
+assets/autotutor-*.png
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Lesson output
+*.mp3
+*.wav
+*.srt
+lessons/
+cli-out/

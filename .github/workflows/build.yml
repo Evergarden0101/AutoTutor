@@ -1,0 +1,92 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: python -m pytest -q tests
+
+      - name: Smoke test the CLI
+        run: python -m autotutor --cli --level N5 --topic daily_life --length short --out cli-out
+
+      - name: Check the CLI produced an MP3
+        shell: python
+        run: |
+          import glob, sys
+          files = glob.glob("cli-out/*.mp3")
+          print("produced:", sorted(glob.glob("cli-out/*")))
+          sys.exit(0 if files and __import__("os").path.getsize(files[0]) > 1000 else 1)
+
+  build-windows:
+    name: Build AutoTutor.exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: python build_exe.py --clean
+
+      - name: Verify the executable exists
+        shell: pwsh
+        run: |
+          $exe = "dist/AutoTutor.exe"
+          if (-not (Test-Path $exe)) { throw "AutoTutor.exe was not produced" }
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "Built AutoTutor.exe ($mb MB)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoTutor-windows-x64
+          path: dist/AutoTutor.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AutoTutor.exe

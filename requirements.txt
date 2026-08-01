@@ -1,0 +1,21 @@
+# Core runtime dependencies for AutoTutor.
+#
+# Everything here works offline once installed; the only network use is the
+# optional article search / online voice / translation features.
+
+# Offline Japanese speech synthesis AND the dictionary used for furigana.
+# pyopenjtalk-plus ships prebuilt wheels for Windows, macOS and Linux
+# (CPython 3.9-3.14), so no compiler is needed to build the executable.
+pyopenjtalk-plus>=0.4.1
+
+# Required by pyopenjtalk (declared explicitly because we use it directly).
+numpy>=1.24
+
+# MP3 encoder (pure wheel, bundles LAME - no ffmpeg required).
+lameenc>=1.7.0
+
+# Fallback reading engine when pyopenjtalk is unavailable.
+pykakasi>=2.2.1
+
+# Optional, online-only: Microsoft Edge neural voices.
+edge-tts>=6.1.0
