@@ -17,10 +17,27 @@ from ..content import generate_lesson
 from ..content.corpus import corpus_stats
 from ..export import export_bundle
 from ..levels import LEVEL_CODES, LEVELS, get_level
-from ..models import LENGTH_PRESETS, GenerationRequest, Lesson, get_length
+from ..models import (
+    LENGTH_PRESETS,
+    REGISTER_OPTIONS,
+    REGISTER_SPOKEN,
+    GenerationRequest,
+    Lesson,
+    get_length,
+    get_register,
+)
 from ..reading import reader_name
 from ..topics import CUSTOM_TOPIC, RANDOM_TOPIC, all_topics
-from ..tts import Narrator, NarrationResult, Player, list_engines
+from ..tts import (
+    Narrator,
+    NarrationResult,
+    Player,
+    VoiceChoice,
+    apply_voice_choice,
+    current_voice_choice,
+    list_engines,
+    list_voice_choices,
+)
 from ..tts.audio import AudioError
 from ..version import APP_TITLE, APP_NAME, __version__
 from .settings_dialog import SettingsDialog
@@ -34,6 +51,7 @@ from .widgets import (
 )
 
 LENGTH_OPTIONS = tuple((p.id, p.display) for p in LENGTH_PRESETS)
+REGISTER_UI_OPTIONS = tuple((r.id, r.label_zh) for r in REGISTER_OPTIONS)
 SOURCE_OPTIONS = (
     ("offline", "离线语料"),
     ("online", "联网搜索"),
@@ -50,8 +68,8 @@ class AutoTutorApp(tk.Tk):
         self.fonts = build_fonts(self, self.settings.font_size)
 
         self.title(APP_TITLE)
-        self.geometry("1120x820")
-        self.minsize(940, 660)
+        self.geometry("1120x900")
+        self.minsize(940, 700)
         apply_theme(self, self.palette, self.fonts)
 
         self.lesson: Optional[Lesson] = None
@@ -144,11 +162,22 @@ class AutoTutorApp(tk.Tk):
             style="Muted.TLabel",
         ).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
+        # -- register ------------------------------------------------------
+        ttk.Label(card, text="语体风格").grid(row=3, column=0, sticky="w", padx=(0, 12),
+                                              pady=(9, 0))
+        self.var_register = tk.StringVar(value=self.settings.register)
+        SegmentedControl(
+            card, REGISTER_UI_OPTIONS, self.var_register, self._on_register_change
+        ).grid(row=3, column=1, sticky="w", pady=(9, 0))
+        self.register_hint = ttk.Label(card, text="", style="Muted.TLabel",
+                                       wraplength=820, justify="left")
+        self.register_hint.grid(row=4, column=1, sticky="w", pady=(3, 0))
+
         # -- topic ---------------------------------------------------------
-        ttk.Label(card, text="主题领域").grid(row=3, column=0, sticky="w", padx=(0, 12),
+        ttk.Label(card, text="主题领域").grid(row=5, column=0, sticky="w", padx=(0, 12),
                                               pady=(9, 0))
         topic_frame = ttk.Frame(card)
-        topic_frame.grid(row=3, column=1, sticky="ew", pady=(9, 0))
+        topic_frame.grid(row=5, column=1, sticky="ew", pady=(9, 0))
         topic_frame.columnconfigure(1, weight=1)
 
         self._topic_ids: List[str] = [t.id for t in all_topics()] + [RANDOM_TOPIC, CUSTOM_TOPIC]
@@ -175,19 +204,19 @@ class AutoTutorApp(tk.Tk):
         )
 
         # -- source --------------------------------------------------------
-        ttk.Label(card, text="内容来源").grid(row=4, column=0, sticky="w", padx=(0, 12),
+        ttk.Label(card, text="内容来源").grid(row=6, column=0, sticky="w", padx=(0, 12),
                                               pady=(9, 0))
         self.var_source = tk.StringVar(value=self.settings.source)
         SegmentedControl(card, SOURCE_OPTIONS, self.var_source, self._on_source_change).grid(
-            row=4, column=1, sticky="w", pady=(9, 0)
+            row=6, column=1, sticky="w", pady=(9, 0)
         )
         self.source_hint = ttk.Label(card, text="", style="Muted.TLabel", wraplength=820,
                                      justify="left")
-        self.source_hint.grid(row=5, column=1, sticky="w", pady=(3, 0))
+        self.source_hint.grid(row=7, column=1, sticky="w", pady=(3, 0))
 
         # -- actions -------------------------------------------------------
         actions = ttk.Frame(card)
-        actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        actions.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         actions.columnconfigure(4, weight=1)
 
         self.btn_generate = ttk.Button(
@@ -210,6 +239,7 @@ class AutoTutorApp(tk.Tk):
         self.bind_all("<Control-e>", lambda _e: self.export())
 
         self._on_level_change(self.var_level.get())
+        self._on_register_change(self.var_register.get())
         self._on_source_change(self.var_source.get())
         self._on_topic_change()
 
@@ -233,6 +263,20 @@ class AutoTutorApp(tk.Tk):
             toolbar, text="显示中文翻译", variable=self.var_show_zh,
             command=self._on_mode_change,
         ).grid(row=0, column=3, sticky="e")
+
+        # -- voice, right where the text it will read is ---------------------
+        voice_row = ttk.Frame(toolbar)
+        voice_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        voice_row.columnconfigure(1, weight=1)
+        ttk.Label(voice_row, text="朗读语音").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.voice_box = ttk.Combobox(voice_row, state="readonly", width=34)
+        self.voice_box.grid(row=0, column=1, sticky="w")
+        self.voice_box.bind("<<ComboboxSelected>>", lambda _e: self._on_voice_change())
+        self.voice_hint = ttk.Label(voice_row, text="", style="Muted.TLabel",
+                                    wraplength=560, justify="left")
+        self.voice_hint.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self._voice_keys: List[str] = []
+        self.refresh_voices()
 
         self.notebook = ttk.Notebook(wrapper)
         self.notebook.grid(row=1, column=0, sticky="nsew")
@@ -300,10 +344,67 @@ class AutoTutorApp(tk.Tk):
         if source == "custom":
             self.notebook.select(self.custom_view)
 
+    def _on_register_change(self, register: str) -> None:
+        option = get_register(register)
+        text = option.description_zh if option else ""
+        if register == REGISTER_SPOKEN:
+            text += "　·　N5–N3 最完整。"
+        self.register_hint.configure(text=text)
+
     def _on_mode_change(self, *_args) -> None:
         self.lesson_view.mode = self.var_mode.get()
         self.lesson_view.show_translation = bool(self.var_show_zh.get())
         self.lesson_view.show_lesson(self.lesson)
+
+    def refresh_voices(self) -> None:
+        """Rebuild the voice list; the online engines come and go with settings."""
+        choices = list_voice_choices(self.settings.allow_online)
+        self._voice_keys = [c.key for c in choices]
+        self.voice_box.configure(values=[c.label for c in choices])
+        if not choices:
+            self.voice_box.set("")
+            self.voice_box.configure(state="disabled")
+            self.voice_hint.configure(text="没有可用的语音引擎，无法生成音频。")
+            return
+
+        self.voice_box.configure(state="readonly")
+        current = current_voice_choice(self.settings)
+        index = self._voice_keys.index(current) if current in self._voice_keys else 0
+        self.voice_box.current(index)
+        # Keep the settings and the box in step: "auto" resolves to whatever is
+        # showing, so the next narration uses the voice the learner can see.
+        apply_voice_choice(self.settings, self._voice_keys[index])
+        self._describe_voice(choices[index])
+
+    def _describe_voice(self, choice: "VoiceChoice") -> None:
+        if choice.requires_network:
+            self.voice_hint.configure(text="在线语音，生成时需要联网。")
+        else:
+            self.voice_hint.configure(text="离线语音，随时可用。")
+
+    def _on_voice_change(self) -> None:
+        index = self.voice_box.current()
+        if not (0 <= index < len(self._voice_keys)):
+            return
+        key = self._voice_keys[index]
+        apply_voice_choice(self.settings, key)
+        self.settings.save()
+        choice = next(
+            (c for c in list_voice_choices(self.settings.allow_online) if c.key == key),
+            None,
+        )
+        if choice:
+            self._describe_voice(choice)
+        self.log(f"朗读语音已切换为 {self.voice_box.get()}")
+        # The rendered audio belongs to the old voice.
+        self._invalidate_narration()
+
+    def _invalidate_narration(self) -> None:
+        if self.narration is None:
+            return
+        self.stop()
+        self.narration = None
+        self.status.set(self._ready_message())
 
     def _selected_topic(self) -> str:
         index = self.topic_box.current()
@@ -367,6 +468,7 @@ class AutoTutorApp(tk.Tk):
             custom_topic=custom,
             length=self.var_length.get(),
             source=self.var_source.get(),
+            register=self.var_register.get(),
             custom_text=custom_text,
             translate=True,
         )
@@ -376,6 +478,7 @@ class AutoTutorApp(tk.Tk):
         self.settings.topic = self._selected_topic()
         self.settings.length = self.var_length.get()
         self.settings.source = self.var_source.get()
+        self.settings.register = self.var_register.get()
         self.settings.show_translation = bool(self.var_show_zh.get())
         self.settings.save()
 
@@ -400,7 +503,7 @@ class AutoTutorApp(tk.Tk):
         self.status.start("正在生成课文…")
         self.log(
             f"生成：级别={request.level} 主题={request.topic_query or request.topic} "
-            f"长度={request.length} 来源={request.source}"
+            f"长度={request.length} 语体={request.register} 来源={request.source}"
         )
 
         def work() -> None:
@@ -665,6 +768,8 @@ class AutoTutorApp(tk.Tk):
         self.narration = None
         self.status.set(self._ready_message())
         self._on_source_change(self.var_source.get())
+        # Turning networking off removes the online voices from the picker.
+        self.refresh_voices()
         self.log("设置已保存，音频将在下次播放时重新合成。")
 
     def show_about(self) -> None:

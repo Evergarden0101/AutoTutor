@@ -93,6 +93,9 @@ class Settings:
     topic: str = "daily_life"
     length: str = "medium"
     source: str = "offline"
+    register: str = "auto"
+    # Comma-separated online source ids; empty means "all of them".
+    sources: str = ""
     show_furigana: bool = True
     show_translation: bool = True
 
@@ -159,6 +162,13 @@ class Settings:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def enabled_source_ids(self) -> set:
+        """Online sources the learner left switched on."""
+        from .content.sources import AUTO_SOURCE_IDS
+
+        chosen = {s.strip() for s in (self.sources or "").split(",") if s.strip()}
+        return chosen & set(AUTO_SOURCE_IDS) or set(AUTO_SOURCE_IDS)
 
     def ensure_output_dir(self) -> Path:
         path = Path(self.output_dir).expanduser()

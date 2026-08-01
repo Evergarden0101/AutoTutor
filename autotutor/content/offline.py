@@ -9,6 +9,13 @@ For the longer presets a single passage is not enough, so the composer widens
 its search in a deliberate order - more passages on the same topic, then
 neighbouring levels of the same topic, then a related topic - and records in
 ``lesson.warnings`` whenever it had to step outside the requested level.
+
+The requested register (conversational or written) is a preference, not a
+filter: there is no conversational material above N3, so a spoken request at
+N1 quietly falls back to the polite passages and says so.  Whichever way it
+lands, the opener, transitions and closer are chosen to match the body that
+was actually collected - a casual talk that opens with みなさん、こんにちは
+sounds like two different speakers spliced together.
 """
 
 from __future__ import annotations
@@ -18,16 +25,25 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional, Tuple
 
-from ..models import GenerationRequest, Lesson, estimate_seconds, target_seconds
+from ..models import (
+    REGISTER_AUTO,
+    REGISTER_SPOKEN,
+    GenerationRequest,
+    Lesson,
+    estimate_seconds,
+    target_seconds,
+)
 from ..topics import CUSTOM_TOPIC, RANDOM_TOPIC, TOPICS, Topic, get_topic
 from .builder import build_lesson
 from .corpus import (
+    REGISTER_NEUTRAL,
     CorpusSentence,
     Passage,
     TopicCorpus,
     available_topic_ids,
     connectives,
     frame_sentences,
+    infer_register,
     load_topic,
     match_topic,
     nearest_levels,
@@ -47,6 +63,7 @@ class _Block:
     level: str = ""
     title_ja: str = ""
     title_zh: str = ""
+    register: str = REGISTER_NEUTRAL
     needs_transition: bool = False
 
     @property
@@ -96,14 +113,26 @@ class OfflineGenerator:
         return f"{corpus_id}:{passage.level}:{passage.title_ja}"
 
     def _passage_blocks(
-        self, corpus: TopicCorpus, level: str, exclude: set
+        self,
+        corpus: TopicCorpus,
+        level: str,
+        exclude: set,
+        register: str = REGISTER_AUTO,
     ) -> List[_Block]:
-        """Every unused passage for ``level``, in random order."""
+        """Every unused passage for ``level``, best register first.
+
+        ``passages_for`` returns the requested register ahead of the neutral
+        fallback, so the shuffle has to stay inside each group or the
+        preference is thrown away.
+        """
         options = [
-            p for p in corpus.passages_for(level)
+            p for p in corpus.passages_for(level, register)
             if self._key(corpus.id, p) not in exclude
         ]
-        self.rng.shuffle(options)
+        wanted = [p for p in options if p.register == register]
+        rest = [p for p in options if p.register != register]
+        self.rng.shuffle(wanted)
+        self.rng.shuffle(rest)
         return [
             _Block(
                 pairs=[(s.ja, s.zh) for s in passage.sentences],
@@ -111,8 +140,9 @@ class OfflineGenerator:
                 level=passage.level,
                 title_ja=passage.title_ja,
                 title_zh=passage.title_zh,
+                register=passage.register,
             )
-            for passage in options
+            for passage in wanted + rest
             if passage.sentences
         ]
 
@@ -130,10 +160,21 @@ class OfflineGenerator:
             if joiner and not ja.startswith(joiner):
                 ja = joiner + ja
             pairs.append((ja, extra.zh))
-        return _Block(pairs=pairs, topic_id=corpus.id, level=level)
+        return _Block(
+            pairs=pairs,
+            topic_id=corpus.id,
+            level=level,
+            register=infer_register([ja for ja, _ in pairs]),
+        )
 
-    def _transition(self, level: str, topic: Optional[Topic], title: str) -> Optional[Pair]:
-        options = frame_sentences("transitions", level)
+    def _transition(
+        self,
+        level: str,
+        topic: Optional[Topic],
+        title: str,
+        register: str = REGISTER_NEUTRAL,
+    ) -> Optional[Pair]:
+        options = frame_sentences("transitions", level, register)
         if not options:
             return None
         chosen = self.rng.choice(options)
@@ -147,8 +188,14 @@ class OfflineGenerator:
               .replace("{title}", title or name_zh))
         return (ja, zh) if ja else None
 
-    def _frame(self, kind: str, level: str, topic: Optional[Topic]) -> Optional[Pair]:
-        options = frame_sentences(kind, level)
+    def _frame(
+        self,
+        kind: str,
+        level: str,
+        topic: Optional[Topic],
+        register: str = REGISTER_NEUTRAL,
+    ) -> Optional[Pair]:
+        options = frame_sentences(kind, level, register)
         if not options:
             return None
         chosen = self.rng.choice(options)
@@ -165,6 +212,8 @@ class OfflineGenerator:
         level: str,
         budget: float,
         warnings: List[str],
+        register: str = REGISTER_AUTO,
+        avoid_repeats: bool = True,
     ) -> List[_Block]:
         """Gather blocks until ``budget`` seconds of speech are covered."""
         used: set = set()
@@ -185,9 +234,14 @@ class OfflineGenerator:
                 total += block.seconds
 
         # 1. Passages at the requested level, freshest first.
-        preferred = self._passage_blocks(corpus, level, used)
-        preferred.sort(key=lambda b: self._key(b.topic_id, Passage(
-            b.level, b.title_ja, b.title_zh, [])) in self._recent)
+        preferred = self._passage_blocks(corpus, level, used, register)
+        # Register first, then freshness: demoting a recently heard passage must
+        # not promote one in the register the learner did not ask for.
+        preferred.sort(key=lambda b: (
+            bool(register) and register != REGISTER_AUTO and b.register != register,
+            avoid_repeats and self._key(b.topic_id, Passage(
+                b.level, b.title_ja, b.title_zh, [])) in self._recent,
+        ))
         take(preferred, mark_transition=True)
 
         # 2. Loose sentences at the requested level.
@@ -202,7 +256,7 @@ class OfflineGenerator:
             for candidate_level in nearest_levels(level)[1:]:
                 if total >= budget:
                     break
-                more = self._passage_blocks(corpus, candidate_level, used)
+                more = self._passage_blocks(corpus, candidate_level, used, register)
                 if more:
                     stepped_out = True
                     take(more, mark_transition=True)
@@ -228,7 +282,7 @@ class OfflineGenerator:
                 other = load_topic(topic_id)
                 if not other:
                     continue
-                more = self._passage_blocks(other, level, used)
+                more = self._passage_blocks(other, level, used, register)
                 if more:
                     added_topics.append(topic_id)
                     take(more[:1], mark_transition=True)
@@ -261,20 +315,38 @@ class OfflineGenerator:
             )
 
         target = target_seconds(request.length)
-        opener = self._frame("openers", level, topic)
-        closer = self._frame("closers", level, topic)
-        frame_seconds = estimate_seconds(
-            [p[0] for p in (opener, closer) if p]
-        )
+        register = request.register or REGISTER_AUTO
+        # The frames have to match the body, and the body is not known until it
+        # has been collected, so budget with the polite frames (the longest) and
+        # re-pick them afterwards.
+        estimate = self._frame("openers", level, topic)
+        frame_seconds = 2 * estimate_seconds([estimate[0]] if estimate else [])
         budget = max(10.0, target - frame_seconds)
 
-        blocks = self._collect_blocks(corpus, level, budget, warnings)
+        # A seed is a promise of reproducibility, and the anti-repeat history
+        # spans calls - it would make the same seed give a different lesson the
+        # second time round.
+        blocks = self._collect_blocks(
+            corpus, level, budget, warnings, register,
+            avoid_repeats=request.seed is None,
+        )
+        spoken = _effective_register(blocks)
+        if register == REGISTER_SPOKEN and spoken != REGISTER_SPOKEN:
+            warnings.append(
+                "这个主题在所选级别下没有足够的口语体课文，已改用礼貌体（です・ます）的内容。"
+                "口语体在 N5–N3 最完整。"
+            )
+
+        opener = self._frame("openers", level, topic, spoken)
+        closer = self._frame("closers", level, topic, spoken)
 
         body: List[Pair] = []
         for block in blocks:
             if block.needs_transition:
                 block_topic = TOPICS.get(block.topic_id, topic)
-                transition = self._transition(level, block_topic, block.title_ja)
+                transition = self._transition(
+                    level, block_topic, block.title_ja, block.register
+                )
                 if transition:
                     body.append(transition)
             body.extend(block.pairs)
@@ -301,6 +373,23 @@ class OfflineGenerator:
             vocab=corpus.vocab_for(level) or corpus.vocab_for(nearest_levels(level)[0]),
             warnings=warnings,
         )
+
+
+def _effective_register(blocks: List[_Block]) -> str:
+    """The register the collected body actually reads in.
+
+    A vote weighted by length, but neutral material abstains: です・ます extras
+    suit either request, so they should not out-vote the passages that gave the
+    lesson its voice.
+    """
+    weights: dict = {}
+    for block in blocks:
+        if block.register == REGISTER_NEUTRAL:
+            continue
+        weights[block.register] = weights.get(block.register, 0.0) + block.seconds
+    if not weights:
+        return REGISTER_NEUTRAL
+    return max(weights.items(), key=lambda item: item[1])[0]
 
 
 _MIN_BODY_SENTENCES = 3

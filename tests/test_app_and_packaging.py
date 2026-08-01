@@ -18,6 +18,7 @@ import pytest
 
 from autotutor.app import _build_parser, main
 from autotutor.console import _needs_utf8, configure_stdio
+from autotutor.content.online import colloquial_score
 from autotutor.version import APP_NAME, __version__
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,14 +33,20 @@ class TestCliParser:
     def test_full_invocation(self):
         args = _build_parser().parse_args(
             ["--cli", "--level", "N3", "--topic", "anime", "--length", "long",
-             "--source", "online", "--seed", "7", "--no-audio"]
+             "--source", "online", "--register", "spoken", "--seed", "7",
+             "--no-audio"]
         )
         assert (args.level, args.topic, args.length) == ("N3", "anime", "long")
         assert args.source == "online" and args.seed == 7 and args.no_audio
+        assert args.register == "spoken"
 
     def test_rejects_unknown_level(self):
         with pytest.raises(SystemExit):
             _build_parser().parse_args(["--level", "N9"])
+
+    def test_rejects_unknown_register(self):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["--register", "polite"])
 
     def test_version_flag_exits_cleanly(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -65,6 +72,23 @@ class TestCliRun:
         ])
         assert code == 0
         assert any(p.suffix == ".txt" for p in tmp_path.iterdir())
+
+    def test_register_reaches_the_generator(self, tmp_path):
+        """Same seed, different register: the flag has to change the text."""
+        texts = {}
+        for register in ("spoken", "written"):
+            out = tmp_path / register
+            code = main([
+                "--cli", "--level", "N4", "--topic", "daily_life",
+                "--length", "short", "--register", register,
+                "--no-audio", "--seed", "3", "--out", str(out),
+            ])
+            assert code == 0
+            path = next(p for p in out.iterdir() if p.suffix == ".txt")
+            texts[register] = path.read_text(encoding="utf-8")
+
+        assert texts["spoken"] != texts["written"]
+        assert colloquial_score(texts["spoken"]) > colloquial_score(texts["written"])
 
 
 class TestConsoleEncoding:

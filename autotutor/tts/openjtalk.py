@@ -44,7 +44,7 @@ class OpenJTalkEngine(TTSEngine):
         )
 
     def voices(self) -> List[Voice]:
-        return [Voice("default", "Open JTalk 標準音声（mei）", "女性")]
+        return [Voice("default", "Open JTalk 標準音声 mei", "女性")]
 
     def synthesize(self, text: str, rate: float = 1.0, voice: str = "") -> PcmClip:
         if self._module is None:

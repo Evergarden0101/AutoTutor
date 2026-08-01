@@ -1,48 +1,63 @@
-"""Search the web for Japanese reading material.
+"""Turn online Japanese material into a lesson.
 
-Two sources are used, both free and key-less:
+The individual fetchers live in :mod:`autotutor.content.sources`; this module
+picks which of them to ask, in what order, and cuts the result down to a
+passage that matches the learner's level, register and requested length.
 
-* **NHK News Web Easy** - news rewritten for learners, ideal for N5/N4.
-* **Japanese Wikipedia** - broad topic coverage for N3 and above.
+Two knobs drive the search:
 
-Fetched text is split into sentences and a sliding window picks the passage
-whose estimated difficulty is closest to the level the learner selected.
+* **level** - a sliding window over each article picks the stretch whose
+  estimated difficulty is closest to the target.
+* **register** - spoken sources (podcast notes, video captions) are tried
+  first when the learner asked for colloquial Japanese, written ones (news,
+  encyclopedia) when they asked for formal, and the window ranking nudges in
+  the same direction.
 """
 
 from __future__ import annotations
 
-import html
 import random
 import re
-from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
 from ..config import Settings
-from ..levels import LEVELS, get_level, score_text, split_sentences
-from ..models import GenerationRequest, Lesson, estimate_seconds, target_seconds
-from ..net import NetworkError, get_json, get_text
+from ..levels import LEVELS, analyse, get_level, score_text, split_sentences
+from ..models import (
+    REGISTER_SPOKEN,
+    REGISTER_WRITTEN,
+    GenerationRequest,
+    Lesson,
+    estimate_seconds,
+    target_seconds,
+)
+from ..net import NetworkError
 from ..reading import normalise
-from ..topics import RANDOM_TOPIC, TOPICS, get_topic, search_terms_for
+from ..topics import RANDOM_TOPIC, get_topic, search_terms_for
 from ..translate import Translator, to_japanese
 from .builder import build_lesson
 from .corpus import available_topic_ids
+from .sources import (
+    Article,
+    SourceError,
+    fetch_youtube_captions,
+    sources_for,
+    strip_html,
+    youtube_video_id,
+)
 
 # Warn once the text is more than a full JLPT level away from the request.
 _LEVEL_GAP_WARNING = 1.0
 
-WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
-NHK_LIST = "https://www3.nhk.or.jp/news/easy/news-list.json"
-NHK_ARTICLE = "https://www3.nhk.or.jp/news/easy/{news_id}/{news_id}.html"
-NHK_PAGE = "https://www3.nhk.or.jp/news/easy/{news_id}/{news_id}.html"
-
-
-@dataclass
-class Article:
-    title: str
-    text: str
-    url: str = ""
-    source_label: str = ""
-    sentences: List[str] = field(default_factory=list)
+__all__ = [
+    "Article",
+    "OnlineError",
+    "OnlineGenerator",
+    "best_window",
+    "clean_sentences",
+    "colloquial_score",
+    "strip_html",
+    "window_for_duration",
+]
 
 
 class OnlineError(RuntimeError):
@@ -50,25 +65,8 @@ class OnlineError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# HTML helpers (no external parser needed)
+# Text clean-up
 # --------------------------------------------------------------------------
-
-_SCRIPT_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.S | re.I)
-_RUBY_ANNOTATION_RE = re.compile(r"<(rt|rp)[^>]*>.*?</\1>", re.S | re.I)
-_TAG_RE = re.compile(r"<[^>]+>")
-_BLANK_RE = re.compile(r"\n{2,}")
-
-
-def strip_html(markup: str) -> str:
-    """Plain text from HTML, discarding ruby annotations (we regenerate them)."""
-    text = _SCRIPT_RE.sub(" ", markup or "")
-    text = _RUBY_ANNOTATION_RE.sub("", text)
-    text = re.sub(r"</(p|div|br|li|h[1-6])>", "\n", text, flags=re.I)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-    text = _TAG_RE.sub("", text)
-    text = html.unescape(text)
-    text = _BLANK_RE.sub("\n", text)
-    return text.strip()
 
 
 def clean_sentences(text: str) -> List[str]:
@@ -97,128 +95,44 @@ def clean_sentences(text: str) -> List[str]:
 
 
 # --------------------------------------------------------------------------
-# Sources
+# Register
 # --------------------------------------------------------------------------
 
+def colloquial_score(text: str) -> float:
+    """0.0 (formal written prose) .. 1.0 (clearly conversational).
 
-def search_wikipedia(term: str, timeout: int, limit: int = 4) -> List[str]:
-    data = get_json(
-        WIKIPEDIA_API,
-        params={
-            "action": "query",
-            "list": "search",
-            "srsearch": term,
-            "srlimit": limit,
-            "srnamespace": 0,
-            "format": "json",
-        },
-        timeout=timeout,
-    )
-    results = ((data or {}).get("query") or {}).get("search") or []
-    return [r.get("title", "") for r in results if r.get("title")]
+    Built on the same sentence-ending statistics the difficulty model uses, so
+    the two never disagree about what "casual" means. です・ます lands in the
+    middle at 0.5: polite Japanese is neither speech nor literary prose, and
+    a learner who asked for either can live with it.
+    """
+    if not (text or "").strip():
+        return 0.0
+    stats = analyse(text)
+    return max(0.0, min(1.0, 0.5 + 0.5 * stats.casual_ratio - 0.5 * stats.written_ratio))
 
 
-def fetch_wikipedia_article(title: str, timeout: int) -> Optional[Article]:
-    data = get_json(
-        WIKIPEDIA_API,
-        params={
-            "action": "query",
-            "prop": "extracts",
-            "explaintext": 1,
-            "exsectionformat": "plain",
-            "redirects": 1,
-            "titles": title,
-            "format": "json",
-        },
-        timeout=timeout,
-    )
-    pages = ((data or {}).get("query") or {}).get("pages") or {}
-    for page in pages.values():
-        extract = (page or {}).get("extract") or ""
-        if not extract.strip():
-            continue
-        real_title = page.get("title", title)
-        url = "https://ja.wikipedia.org/wiki/" + real_title.replace(" ", "_")
-        return Article(
-            title=real_title,
-            text=extract,
-            url=url,
-            source_label="ウィキペディア（日本語版）/ 维基百科",
-        )
-    return None
+def _register_penalty(text: str, register: str) -> float:
+    """How badly ``text`` misses the requested register (0 = perfect)."""
+    if register == REGISTER_SPOKEN:
+        return 1.0 - colloquial_score(text)
+    if register == REGISTER_WRITTEN:
+        return colloquial_score(text)
+    return 0.0
 
 
-def fetch_nhk_easy(timeout: int, term: str = "", limit: int = 6) -> List[Article]:
-    """Recent NHK News Web Easy articles, optionally filtered by keyword."""
-    raw = get_text(NHK_LIST, timeout=timeout)
-    raw = raw.lstrip("﻿")
-    data = get_json_from_text(raw)
-    items: List[dict] = []
-    if isinstance(data, list):
-        for group in data:
-            if isinstance(group, dict):
-                for _day, entries in sorted(group.items(), reverse=True):
-                    if isinstance(entries, list):
-                        items.extend(e for e in entries if isinstance(e, dict))
-    if not items:
-        raise OnlineError("NHK Easy 没有返回文章列表。")
-
-    if term:
-        filtered = [i for i in items if term in (i.get("title") or "")]
-        items = filtered or items
-
-    articles: List[Article] = []
-    for item in items[: limit * 2]:
-        news_id = item.get("news_id") or ""
-        title = re.sub(r"<[^>]+>", "", item.get("title") or "")
-        if not news_id:
-            continue
-        try:
-            markup = get_text(NHK_ARTICLE.format(news_id=news_id), timeout=timeout)
-        except NetworkError:
-            continue
-        body = extract_nhk_body(markup)
-        if not body:
-            continue
-        articles.append(
-            Article(
-                title=title,
-                text=body,
-                url=NHK_PAGE.format(news_id=news_id),
-                source_label="NHK NEWS WEB EASY（やさしい日本語）",
-            )
-        )
-        if len(articles) >= limit:
-            break
-    if not articles:
-        raise OnlineError("未能读取 NHK Easy 的正文。")
-    return articles
+# A register miss is worth about one JLPT level when ranking candidates: a
+# learner who asked for conversational Japanese would rather hear a slightly
+# off-level podcast note than a perfectly graded encyclopedia entry.
+_REGISTER_COST = 0.8
 
 
-def get_json_from_text(raw: str):
-    import json
-
-    try:
-        return json.loads(raw)
-    except ValueError as exc:
-        raise OnlineError(f"NHK Easy 返回的内容无法解析：{exc}") from exc
-
-
-def extract_nhk_body(markup: str) -> str:
-    match = re.search(
-        r'<div[^>]+id="js-article-body"[^>]*>(.*?)</div>', markup, re.S | re.I
-    )
-    if not match:
-        match = re.search(
-            r'<div[^>]+class="[^"]*article-main__body[^"]*"[^>]*>(.*?)</div>',
-            markup,
-            re.S | re.I,
-        )
-    if not match:
-        match = re.search(r"<article[^>]*>(.*?)</article>", markup, re.S | re.I)
-    if not match:
-        return ""
-    return strip_html(match.group(1))
+def _article_register_cost(article: Article, window: Sequence[str], register: str) -> float:
+    """Penalty for an article in the wrong register, declared and measured."""
+    if register not in (REGISTER_SPOKEN, REGISTER_WRITTEN):
+        return 0.0
+    declared = _REGISTER_COST if article.register != register else 0.0
+    return declared + _register_penalty("".join(window), register) * _REGISTER_COST
 
 
 # --------------------------------------------------------------------------
@@ -226,7 +140,9 @@ def extract_nhk_body(markup: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def best_window(sentences: Sequence[str], level: str, size: int) -> Tuple[List[str], float]:
+def best_window(
+    sentences: Sequence[str], level: str, size: int, register: str = "auto"
+) -> Tuple[List[str], float]:
     """Pick ``size`` consecutive sentences closest to ``level``."""
     if not sentences:
         return [], 99.0
@@ -239,9 +155,15 @@ def best_window(sentences: Sequence[str], level: str, size: int) -> Tuple[List[s
         window = scores[start: start + size]
         mean = sum(window) / len(window)
         spread = max(window) - min(window)
-        # Prefer windows near the target level and internally consistent;
-        # a small bonus keeps us near the top of the article.
-        cost = abs(mean - target) + spread * 0.15 + start * 0.01
+        text = "".join(sentences[start: start + size])
+        # Prefer windows near the target level, internally consistent, and in
+        # the requested register; a small bonus keeps us near the top.
+        cost = (
+            abs(mean - target)
+            + spread * 0.15
+            + _register_penalty(text, register) * 1.2
+            + start * 0.01
+        )
         if cost < best_cost:
             best_cost, best_index = cost, start
 
@@ -251,17 +173,15 @@ def best_window(sentences: Sequence[str], level: str, size: int) -> Tuple[List[s
 
 
 def window_for_duration(
-    sentences: Sequence[str], level: str, seconds: float
+    sentences: Sequence[str], level: str, seconds: float, register: str = "auto"
 ) -> Tuple[List[str], float]:
     """Like :func:`best_window`, but sized to fill ``seconds`` of narration."""
     if not sentences:
         return [], 99.0
-    # Grow the window until the estimated narration reaches the target, or we
-    # run out of article.
     size = 2
     while size < len(sentences) and estimate_seconds(list(sentences[:size])) < seconds:
         size += 1
-    return best_window(sentences, level, size)
+    return best_window(sentences, level, size, register)
 
 
 # --------------------------------------------------------------------------
@@ -274,12 +194,13 @@ class OnlineGenerator:
         self.settings = settings
         self.rng = rng or random.Random()
 
-    def _collect(self, request: GenerationRequest, warnings: List[str]) -> List[Article]:
+    # -- gathering ---------------------------------------------------------
+    def _search_terms(self, request: GenerationRequest) -> Tuple[str, List[str]]:
         timeout = self.settings.request_timeout
         topic_id = request.topic
         if topic_id == RANDOM_TOPIC:
-            ids = list(available_topic_ids()) or list(TOPICS)
-            topic_id = self.rng.choice(ids)
+            ids = list(available_topic_ids())
+            topic_id = self.rng.choice(ids) if ids else "daily_life"
 
         query = request.topic_query
         if query:
@@ -289,76 +210,93 @@ class OnlineGenerator:
             topic = get_topic(topic_id)
             terms = [topic.name_ja] if topic else ["日本語"]
         self.rng.shuffle(terms)
+        return topic_id, terms
+
+    def _collect(self, request: GenerationRequest, warnings: List[str]) -> List[Article]:
+        timeout = self.settings.request_timeout
+        _topic_id, terms = self._search_terms(request)
+        primary = terms[0] if terms else ""
 
         articles: List[Article] = []
-        rank = get_level(request.level).rank
+        failures: List[str] = []
+        enabled = self.settings.enabled_source_ids()
 
-        # Learner-friendly news first for the two lowest levels.
-        if rank <= 2:
-            try:
-                articles.extend(fetch_nhk_easy(timeout, term=query or "", limit=4))
-            except (NetworkError, OnlineError) as exc:
-                warnings.append(f"NHK Easy 暂时不可用（{exc}），已改用维基百科。")
-
-        for term in terms[:3]:
-            try:
-                titles = search_wikipedia(term, timeout)
-            except NetworkError as exc:
-                warnings.append(f"维基百科搜索失败：{exc}")
-                continue
-            for title in titles[:2]:
-                try:
-                    article = fetch_wikipedia_article(title, timeout)
-                except NetworkError:
-                    continue
-                if article:
-                    articles.append(article)
-            if len(articles) >= 4:
+        for source in sources_for(request.register, request.level):
+            if len(articles) >= 5:
                 break
+            if source.id not in enabled:
+                continue
+            try:
+                found = source.fetch(primary, timeout)
+            except (SourceError, NetworkError) as exc:
+                failures.append(f"{source.label_zh}：{exc}")
+                continue
+            articles.extend(found)
+
+        if failures and articles:
+            warnings.append("部分来源没有取到内容（" + "；".join(failures[:2]) + "）。")
+        elif failures and not articles:
+            warnings.extend(f"来源不可用 — {f}" for f in failures[:3])
         return articles
 
+    def _from_url(self, url: str, warnings: List[str]) -> List[Article]:
+        try:
+            return [fetch_youtube_captions(url, self.settings.request_timeout)]
+        except (SourceError, NetworkError) as exc:
+            raise OnlineError(str(exc)) from exc
+
+    # -- generation --------------------------------------------------------
     def generate(self, request: GenerationRequest) -> Lesson:
         warnings: List[str] = []
-        articles = self._collect(request, warnings)
+
+        # A pasted video link is treated as an explicit request for its captions.
+        video_url = request.topic_query if youtube_video_id(request.topic_query) else ""
+        if video_url:
+            articles = self._from_url(video_url, warnings)
+        else:
+            articles = self._collect(request, warnings)
+
         if not articles:
             raise OnlineError(
-                "没有搜到合适的日语文章。请检查网络连接，或换一个主题再试。"
+                "没有搜到合适的日语内容。请检查网络连接，或换一个主题／来源再试。"
             )
 
         target = float(target_seconds(request.length))
-        candidates: List[Tuple[Article, List[str], float]] = []
+        candidates: List[Tuple[Article, List[str], float, float]] = []
         for article in articles:
             sentences = clean_sentences(article.text)
             if len(sentences) < 3:
                 continue
-            window, distance = window_for_duration(sentences, request.level, target)
+            window, distance = window_for_duration(
+                sentences, request.level, target, request.register
+            )
             if window:
-                candidates.append((article, window, distance))
+                cost = distance + _article_register_cost(article, window, request.register)
+                candidates.append((article, window, distance, cost))
 
         if not candidates:
-            raise OnlineError("搜到的文章无法拆成合适的句子，请换一个主题再试。")
+            raise OnlineError("搜到的内容无法拆成合适的句子，请换一个主题或来源再试。")
 
-        candidates.sort(key=lambda item: item[2])
-        article, window, distance = candidates[0]
+        # Ranked on level *and* register: sorting on level alone would throw
+        # away the source ordering, and an encyclopedia article is almost
+        # always closer to N2 than a podcast note is.
+        candidates.sort(key=lambda item: item[3])
+        article, window, distance, _ = candidates[0]
 
         # A single article is often too short for the longer presets; keep
-        # pulling in the next-closest articles until the target is reached.
+        # pulling in the next-closest ones until the target is reached.
         extra_sources: List[Article] = []
-        for other, other_window, _ in candidates[1:]:
+        for other, other_window, _, _cost in candidates[1:]:
             if estimate_seconds(window) >= target:
                 break
             window = window + other_window
             extra_sources.append(other)
         if extra_sources:
-            titles = "、".join(a.title for a in extra_sources[:3])
-            warnings.append(f"为了达到所选时长，课文还合并了其他文章：{titles}。")
+            titles = "、".join(a.title for a in extra_sources[:3] if a.title)
+            if titles:
+                warnings.append(f"为了达到所选时长，课文还合并了：{titles}。")
 
         estimated = sum(score_text(s) for s in window) / len(window)
-        if estimate_seconds(window) < target * 0.6:
-            warnings.append(
-                "搜到的文章比所选时长短，已按实际内容生成。"
-                "想要更长的音频，可以换用离线语料或 AI 生成模式。"
-            )
         if distance > _LEVEL_GAP_WARNING:
             level_name = LEVELS[request.level].label_zh
             warnings.append(
@@ -366,6 +304,24 @@ class OnlineGenerator:
                 f"（1=N5，5=N1），与所选的 {request.level}（{level_name}）差距较大。"
                 "如需完全贴合级别，请使用离线语料模式。"
             )
+        if estimate_seconds(window) < target * 0.6:
+            warnings.append(
+                "取到的内容比所选时长短，已按实际长度生成。"
+                "想要更长的音频，可以换用离线语料或 AI 生成模式。"
+            )
+        if request.register in (REGISTER_SPOKEN, REGISTER_WRITTEN):
+            # Both signals matter: the source that was actually used, and how
+            # the text reads. Merging a second article to fill the time can
+            # pull the measured score back to the middle while the lesson is
+            # still led by a source in the wrong register.
+            actual = colloquial_score("".join(window))
+            wanted_spoken = request.register == REGISTER_SPOKEN
+            off_text = actual < 0.5 if wanted_spoken else actual > 0.5
+            if article.register != request.register or off_text:
+                warnings.append(
+                    "这段内容的语体和所选的不完全一致，"
+                    "可以在「设置 → 联网」里调整启用的来源。"
+                )
 
         translator = Translator(
             timeout=self.settings.request_timeout,

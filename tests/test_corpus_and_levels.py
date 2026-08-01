@@ -8,10 +8,14 @@ import re
 import pytest
 
 from autotutor.content.corpus import (
+    REGISTER_NEUTRAL,
+    REGISTER_SPOKEN,
+    REGISTER_WRITTEN,
     available_topic_ids,
     corpus_dir,
     corpus_stats,
     frame_sentences,
+    infer_register,
     load_common,
     load_topic,
     match_topic,
@@ -67,6 +71,17 @@ class TestCorpusIntegrity:
         for path in corpus_dir().glob("*.json"):
             json.loads(path.read_text(encoding="utf-8"))
 
+    def test_sentences_are_not_double_sentences(self):
+        """One record, one sentence - the cursor highlights whole records."""
+        for topic_id in TOPIC_IDS:
+            corpus = load_topic(topic_id)
+            records = [s for p in corpus.passages for s in p.sentences]
+            records += [s for items in corpus.extras.values() for s in items]
+            for record in records:
+                if "「" in record.ja:  # quoted speech keeps its inner 。
+                    continue
+                assert not any(c in record.ja[:-1] for c in "。！？"), record.ja
+
     def test_stats(self):
         stats = corpus_stats()
         assert len(stats) == len(TOPIC_IDS)
@@ -74,17 +89,81 @@ class TestCorpusIntegrity:
 
     @pytest.mark.parametrize("topic_id", TOPIC_IDS)
     def test_passages_read_as_paragraphs(self, topic_id):
-        """Sentences should be developed, not one-line facts."""
+        """Sentences should be developed, not one-line facts.
+
+        Conversational passages get their own, lower floors: speech really is
+        made of shorter turns, and holding 今日は本当に暑いね to the length of
+        an editorial sentence would only produce unnatural Japanese.
+        """
+        # Floors sit below the observed minimum per level but well above the
+        # short, choppy sentences this corpus replaced (N5 18 -> 27 chars).
+        written = {"N5": 22, "N4": 27, "N3": 32, "N2": 34, "N1": 35}
+        spoken = {"N5": 13, "N4": 19, "N3": 22, "N2": 24, "N1": 26}
         for passage in load_topic(topic_id).passages:
             lengths = [len(s.ja) for s in passage.sentences]
             average = sum(lengths) / len(lengths)
-            # Floors sit below the observed minimum per level but well above the
-            # short, choppy sentences this corpus replaced (N5 18 -> 27 chars).
-            floor = {"N5": 22, "N4": 27, "N3": 32, "N2": 34, "N1": 35}[passage.level]
+            casual = passage.register == REGISTER_SPOKEN
+            floor = (spoken if casual else written)[passage.level]
             assert average >= floor, (
-                f"{topic_id}/{passage.level}: mean {average:.0f} chars, want >= {floor}"
+                f"{topic_id}/{passage.level} ({passage.register}): "
+                f"mean {average:.0f} chars, want >= {floor}"
             )
-            assert len(passage.sentences) >= 6
+            assert len(passage.sentences) >= (5 if casual else 6)
+
+
+class TestRegister:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("毎朝六時に起きます。", REGISTER_NEUTRAL),
+            ("土日は休みだから、家族と過ごしてるよ。", REGISTER_SPOKEN),
+            ("安いからってつい買っちゃうんだよね。", REGISTER_SPOKEN),
+            ("まだ間に合うかな。", REGISTER_SPOKEN),
+            ("観光客の増加は、地域経済に大きな恩恵をもたらしてきた。", REGISTER_WRITTEN),
+            ("この点は今後の課題であると言えるだろう。", REGISTER_WRITTEN),
+        ],
+    )
+    def test_infer_register(self, text, expected):
+        assert infer_register([text]) == expected
+
+    def test_written_markers_beat_lookalike_substrings(self):
+        """かな in 追いつかない and んだ in 進んだ are not colloquial."""
+        text = (
+            "処理が追いつかないごみの増加は、その典型的な例だと言えるだろう。"
+            "整備は着実に進んだものの、課題は依然として残されている。"
+        )
+        assert infer_register(split_sentences(text)) == REGISTER_WRITTEN
+
+    @pytest.mark.parametrize("topic_id", TOPIC_IDS)
+    def test_tags_agree_with_inference(self, topic_id):
+        """A hand-tagged register that the text does not support is a bug."""
+        for passage in load_topic(topic_id).passages:
+            inferred = infer_register([s.ja for s in passage.sentences])
+            assert inferred == passage.register, (
+                f"{topic_id}/{passage.level} tagged {passage.register}, "
+                f"reads as {inferred}: {passage.title_ja}"
+            )
+
+    @pytest.mark.parametrize("topic_id", TOPIC_IDS)
+    def test_every_topic_offers_conversational_material(self, topic_id):
+        levels = {p.level for p in load_topic(topic_id).passages
+                  if p.register == REGISTER_SPOKEN}
+        assert {"N5", "N4", "N3"} <= levels
+
+    def test_passages_for_falls_back_to_neutral(self):
+        corpus = load_topic("daily_life")
+        spoken = corpus.passages_for("N5", REGISTER_SPOKEN)
+        assert spoken and spoken[0].register == REGISTER_SPOKEN
+        # N1 has no conversational passage; the polite/neutral ones stand in
+        # rather than the request returning nothing.
+        assert corpus.passages_for("N1", REGISTER_SPOKEN) is not None
+
+    def test_plain_casual_scores_easier_than_plain_formal(self):
+        """常体 is not 書き言葉: a casual sentence must not read as advanced."""
+        casual = score_text("土日は休みだから、家族と過ごしてるよ。")
+        formal = score_text("休日は家族と過ごすことが多いとされている。")
+        assert casual < formal
+        assert estimate_level("今日は本当に暑いね。") in {"N5", "N4"}
 
 
 class TestCommonFrames:

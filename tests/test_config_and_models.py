@@ -7,14 +7,20 @@ import json
 import pytest
 
 from autotutor.config import Settings, data_dir, resource_root
+from autotutor.content.sources import AUTO_SOURCE_IDS
 from autotutor.models import (
     LENGTH_IDS,
+    REGISTER_AUTO,
+    REGISTER_IDS,
+    REGISTER_OPTIONS,
+    REGISTER_SPOKEN,
     GenerationRequest,
     Lesson,
     RubySegment,
     Sentence,
     VocabEntry,
     estimate_seconds,
+    get_register,
     target_seconds,
     target_sentence_count,
 )
@@ -70,6 +76,60 @@ class TestSettings:
         settings = Settings()
         settings.output_dir = str(tmp_path / "deep" / "nested")
         assert settings.ensure_output_dir().is_dir()
+
+
+class TestEnabledSources:
+    def test_empty_means_every_source(self):
+        assert Settings().enabled_source_ids() == set(AUTO_SOURCE_IDS)
+
+    def test_a_subset_is_honoured(self):
+        settings = Settings()
+        settings.sources = "podcast,wikipedia"
+        assert settings.enabled_source_ids() == {"podcast", "wikipedia"}
+
+    def test_whitespace_and_unknown_ids_are_dropped(self):
+        settings = Settings()
+        settings.sources = " podcast , not_a_source ,, "
+        assert settings.enabled_source_ids() == {"podcast"}
+
+    def test_only_unknown_ids_falls_back_to_everything(self):
+        """A search with no sources would always fail; that helps nobody."""
+        settings = Settings()
+        settings.sources = "gone_in_a_later_version"
+        assert settings.enabled_source_ids() == set(AUTO_SOURCE_IDS)
+
+    def test_youtube_cannot_be_enabled_for_searching(self):
+        settings = Settings()
+        settings.sources = "youtube"
+        assert settings.enabled_source_ids() == set(AUTO_SOURCE_IDS)
+
+
+class TestRegisterOptions:
+    def test_ids_are_unique_and_include_auto(self):
+        assert len(set(REGISTER_IDS)) == len(REGISTER_IDS)
+        assert REGISTER_IDS[0] == REGISTER_AUTO
+
+    def test_every_option_is_labelled_in_both_languages(self):
+        for option in REGISTER_OPTIONS:
+            assert option.label_zh and option.label_ja and option.description_zh
+
+    def test_lookup(self):
+        assert get_register(REGISTER_SPOKEN).label_ja == "話し言葉"
+        assert get_register("nonsense") is None
+
+    def test_request_defaults_to_auto(self):
+        assert GenerationRequest().register == REGISTER_AUTO
+
+    def test_settings_default_and_round_trip(self, tmp_path):
+        assert Settings().register == REGISTER_AUTO
+        path = tmp_path / "settings.json"
+        settings = Settings()
+        settings.register = REGISTER_SPOKEN
+        settings.sources = "podcast"
+        settings.save(path)
+        loaded = Settings.load(path)
+        assert loaded.register == REGISTER_SPOKEN
+        assert loaded.sources == "podcast"
 
 
 class TestPaths:

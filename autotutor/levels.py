@@ -7,16 +7,23 @@ The estimator is used in two places:
 * to warn the learner when a custom text they pasted is far from the level
   they selected.
 
-The score is a small linear model over four surface features (kanji
-sophistication, sentence length, compound-word density and whether the text
-uses plain written style rather than です/ます).  Its weights were fitted by
-least squares against the 750 level-labelled sentences in the bundled corpus;
-on that data it explains 82% of the variance and lands within one JLPT level
-95% of the time.
+The score is a small linear model over three surface features (kanji
+sophistication, sentence length, and how much of the text is plain *written*
+style - neither です/ます nor colloquial).  Its weights were fitted by least
+squares against the level-labelled sentences in the bundled corpus; on that
+data it explains 73% of the variance and lands within one JLPT level 85% of
+the time.
+
+Note the shape of the written-style feature.  An earlier version used simply
+"not です/ます", which worked only because the corpus was polite at N5-N3 and
+plain at N2-N1.  Once conversational passages were added, that proxy scored
+過ごしてるよ as harder than 過ごしています, which is backwards: 常体 is not the
+same thing as 書き言葉.  The feature now counts the plain sentences that are
+*not* colloquial either, and 終助詞 endings are subtracted out.
 
 Two caveats worth knowing: the kanji bands below follow the widely circulated
 JLPT kanji lists rather than an official specification, and surface statistics
-barely separate N2 from N1 - both land around 4.4.  Treat the output as a
+barely separate N2 from N1 - both land around 4.2.  Treat the output as a
 ranking signal, not a verdict.
 """
 
@@ -58,14 +65,30 @@ _KANA_RE = re.compile(r"[぀-ゟ゠-ヿー]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?])\s*")
 # Sentence endings that mark learner-facing polite style.
 _POLITE_END_RE = re.compile(r"(ます|ました|ません|でしょう|です|でした|ください)[。！？!?]?$")
+# Sentence endings that mark casual speech. Plain form on its own does not mean
+# literary Japanese - 過ごしてるよ is 常体 but easier than です/ます, not harder -
+# so these are subtracted from the written-style feature.
+_CASUAL_END_RE = re.compile(
+    r"("
+    r"だよ|だね|だな|よね|よな|かな|かなあ|けど|けどね|でしょ|だろ|じゃない|じゃん"
+    r"|んだ|んだよ|んだね|もん|のに|って|してる|ってる|でる"
+    r"|[^、。！？!?\s]([よねさわぞ]|っけ|かい)"
+    r")[。！？!?]?$"
+)
+# Contractions and fillers that only occur in speech, wherever they appear.
+_CASUAL_INLINE_RE = re.compile(
+    r"ちゃう|ちゃっ|じゃっ|なきゃ|なくちゃ|なんか|やっぱ|だってさ|ってさ|みたいな感じ"
+)
 
 # Least-squares weights fitted against the bundled level-labelled corpus.
-# Refit after the corpus was rewritten with longer, paragraph-style passages.
-_W_KANJI_BAND = 0.439
-_W_SENTENCE_LEN = 0.602
-_W_COMPOUND = 0.144
-_W_WRITTEN_STYLE = 1.749
-_W_INTERCEPT = -0.906
+# Refit after conversational passages were added and the written-style feature
+# was redefined. compound_ratio was dropped in this refit: its coefficient is
+# positive but including it inverts the N2/N1 ordering, and the two levels are
+# barely separable by surface statistics anyway.
+_W_KANJI_BAND = 0.557
+_W_SENTENCE_LEN = 0.818
+_W_WRITTEN_STYLE = 1.133
+_W_INTERCEPT = -1.627
 
 
 @dataclass(frozen=True)
@@ -204,6 +227,8 @@ class TextStats:
     mean_kanji_band: float = 1.0
     compound_ratio: float = 0.0
     polite_ratio: float = 1.0
+    casual_ratio: float = 0.0
+    written_ratio: float = 0.0
     unique_kanji: List[str] = field(default_factory=list)
 
 
@@ -244,8 +269,16 @@ def analyse(text: str) -> TextStats:
         # separates a news article from a textbook dialogue.
         stats.compound_ratio = sum(1 for r in runs if len(r) >= 2) / len(runs)
 
-    polite = sum(1 for s in (sentences or [text]) if _POLITE_END_RE.search(s))
-    stats.polite_ratio = polite / len(sentences or [text])
+    counted = sentences or [text]
+    polite = sum(1 for s in counted if _POLITE_END_RE.search(s))
+    casual = sum(1 for s in counted
+                 if not _POLITE_END_RE.search(s)
+                 and (_CASUAL_END_RE.search(s) or _CASUAL_INLINE_RE.search(s)))
+    stats.polite_ratio = polite / len(counted)
+    stats.casual_ratio = casual / len(counted)
+    # What is left is plain form that is neither polite nor colloquial: the
+    # 常体 of newspapers, essays and encyclopedias.
+    stats.written_ratio = max(0.0, 1.0 - stats.polite_ratio - stats.casual_ratio)
     return stats
 
 
@@ -258,8 +291,7 @@ def score_text(text: str) -> float:
     score = (
         _W_KANJI_BAND * stats.mean_kanji_band
         + _W_SENTENCE_LEN * min(6.0, stats.avg_sentence_chars / 10.0)
-        + _W_COMPOUND * stats.compound_ratio
-        + _W_WRITTEN_STYLE * (1.0 - stats.polite_ratio)
+        + _W_WRITTEN_STYLE * stats.written_ratio
         + _W_INTERCEPT
     )
     return round(min(5.0, max(1.0, score)), 2)

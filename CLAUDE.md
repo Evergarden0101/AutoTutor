@@ -19,7 +19,7 @@ Target user reads Simplified Chinese and is learning Japanese.
 python -m autotutor                       # GUI
 python -m autotutor --cli --level N5 --topic daily_life --length short
 python -m autotutor --cli --level N3 --topic technology --length xlong   # ~8 min
-python -m pytest -q tests                 # 258 tests, ~13s
+python -m pytest -q tests                 # 390 tests, ~12s
 python -m pyflakes autotutor tests        # lint
 python build_exe.py --clean               # build the executable
 python assets/make_icon.py                # regenerate the icon
@@ -45,10 +45,10 @@ autotutor/
   levels.py       JLPT levels + difficulty model     topics.py   topic registry
   reading.py      furigana engines and alignment     translate.py ja→zh back-ends
   export.py       mp3/txt/html-ruby/srt/json         net.py      stdlib HTTP
-  content/        corpus, offline, online, llm, service, builder
+  content/        corpus, offline, online, sources, llm, service, builder
   tts/            audio (clips/mp3/playback), openjtalk, sapi, edge
   ui/             main_window, widgets, settings_dialog, theme
-  data/corpus/    15 topics × N5–N1 (750 sentences) + _common.json
+  data/corpus/    15 topics × N5–N1 × 2 registers (1012 sentences) + _common.json
 launcher.py       frozen entry point (see gotcha #1)
 ```
 
@@ -63,6 +63,22 @@ against the bundled voice (6.9 kana/s, 1.28 kana per written character). The
 offline composer keeps pulling blocks until the budget is met, widening from
 "more passages on this topic" to "neighbouring levels" to "another topic", and
 records each widening in `lesson.warnings`.
+
+**Register (语体) is a preference, not a filter.** `GenerationRequest.register`
+is auto/spoken/written. Conversational passages exist at N5–N3 only, so a
+spoken request above that falls back to the neutral です・ます passages and
+warns. `corpus.passages_for(level, register)` returns `wanted + neutral`, and
+`offline._effective_register()` decides from what was *actually* collected
+which opener/closer to use — a casual talk that opens with みなさん、こんにちは
+sounds like two speakers spliced together.
+
+**Online sources live in `content/sources.py`.** Each `Source` is a small
+independent fetcher with an `id`, a register and a list of levels it suits;
+`sources_for(register, level)` orders them and `online.OnlineGenerator._collect`
+walks that order, skipping ones the user disabled and collecting failures rather
+than aborting. Adding a source = add the fetch function and one `Source(...)`
+entry; the settings dialog builds its checkboxes from the registry. YouTube is
+in `SOURCES` but not `AUTO_SOURCE_IDS` — it needs a URL, it is never searched.
 
 ## Gotchas that will bite you
 
@@ -99,10 +115,12 @@ These each cost real debugging time. Please keep the guarding tests.
    from a least-squares fit over the labelled corpus. If you materially change
    the corpus, refit them and update the numbers quoted in the README and
    docstring. `test_score_is_monotonic_across_corpus_levels` will fail loudly
-   if the model stops separating levels. (This has already happened once: the
-   corpus rewrite to longer passages moved every feature, and the weights were
-   refit from scratch. Drop any feature whose fitted coefficient comes out
-   negative — that is collinearity, not signal.)
+   if the model stops separating levels. This has happened twice: the corpus
+   rewrite to longer passages moved every feature, and adding conversational
+   passages broke the written-style feature outright (see #11). Drop any
+   feature whose fitted coefficient comes out negative — that is collinearity,
+   not signal — and any feature that inverts the level ordering, which is how
+   `compound_ratio` came out of the model in the second refit.
 
 8. **Every online path must fall back to the offline corpus** and explain why
    in `lesson.warnings`. See `content/service.py`. Never let a network failure
@@ -119,6 +137,30 @@ These each cost real debugging time. Please keep the guarding tests.
     deleting a ▶ during playback would invalidate them, so the glyph is written
     once in the widget background colour and re-tagged in the accent colour
     when that sentence is being read.
+
+11. **常体 is not 書き言葉.** The written-style feature used to be
+    `1 - polite_ratio`, which only worked because the corpus was polite at
+    N5–N3 and plain at N2–N1. Conversational passages are plain *and* easy, so
+    that proxy scored 過ごしてるよ as harder than 過ごしています. Colloquial
+    endings (`_CASUAL_END_RE`, `_CASUAL_INLINE_RE` in `levels.py`) are now
+    subtracted out. Match colloquial markers **at the end of a sentence** — a
+    substring search finds かな inside 追いつかない and んだ inside 進んだ, and
+    labels an editorial as casual. Guarded by
+    `TestRegister::test_written_markers_beat_lookalike_substrings` and
+    `test_plain_casual_scores_easier_than_plain_formal`.
+
+12. **The anti-repeat history defeats a seed.** `OfflineGenerator._recent`
+    spans calls, so the same seed gave a different lesson the second time round
+    once the corpus had more than one passage per level to choose from.
+    `_collect_blocks(avoid_repeats=request.seed is None)` keeps both promises.
+    Guarded by `test_seed_makes_it_repeatable` and `test_repeated_calls_vary`.
+
+13. **Ranking online candidates on level alone throws the register away.** An
+    encyclopedia article is almost always a closer level match than a podcast
+    note, so `online.generate` adds `_article_register_cost` (worth about one
+    JLPT level) to the sort key. Guarded by
+    `test_register_beats_a_closer_level_match` and, for the other direction,
+    `test_a_large_level_gap_still_wins`.
 
 ## Conventions
 
@@ -141,22 +183,33 @@ These each cost real debugging time. Please keep the guarding tests.
 ```json
 {
   "id": "hospital",
-  "passages": [{"level": "N5", "title_ja": "...", "title_zh": "...",
+  "passages": [{"level": "N5", "register": "spoken",
+                "title_ja": "...", "title_zh": "...",
                 "sentences": [{"ja": "...。", "zh": "..."}]}],
   "extras":  {"N5": [{"ja": "...。", "zh": "..."}]},
   "vocab":   {"N5": [{"word": "病院", "zh": "医院"}]}
 }
 ```
 
+`register` is optional; without it `corpus.infer_register()` derives one from
+the text. Explicit tags exist so the conversational passages cannot be lost by
+a change to the heuristic — and `test_tags_agree_with_inference` fails if a tag
+stops matching what the passage actually reads like, so the two can never drift
+apart.
+
 Invariants enforced by `tests/test_corpus_and_levels.py`:
 
 - every registered topic in `topics.py` has a corpus file, and vice versa;
-- every topic covers all five levels in `passages`, `extras` and `vocab`;
+- every topic covers all five levels in `passages`, `extras` and `vocab`, and
+  has conversational passages at N5, N4 and N3;
 - every `ja` ends with 。！？ and has a non-empty `zh`;
+- one record holds exactly one sentence (the playback cursor highlights whole
+  records) — quoted speech may keep an inner 。;
 - no stray Latin words in the Japanese (a common drafting slip);
-- passages have both titles and at least 6 sentences;
+- passages have both titles and at least 6 sentences (5 when conversational);
 - passage sentences average enough characters per level that the result reads
-  as a paragraph rather than a list of one-line facts
+  as a paragraph rather than a list of one-line facts, with a lower floor for
+  conversational passages because speech really is made of shorter turns
   (`test_passages_read_as_paragraphs`).
 
 Passages are written as developed paragraphs with an arc - situation,
@@ -164,6 +217,11 @@ development, complication, reflection - because the composer now plays whole
 passages rather than padding with unrelated sentences. Longer sentences at low
 levels come from coordination (て-form chains, から/ので), not from grammar
 above the level.
+
+Conversational passages use 常体 with 終助詞 (ね・よ・んだ・けど), contractions
+(てる, ちゃう) and a first-person voice. Keep them within the grammar of their
+level: casual is a register, not a difficulty. `_common.json` carries matching
+casual openers, transitions and closers, tagged `"register": "spoken"`.
 
 Do **not** store kana readings in the corpus — they are generated at runtime so
 the printed furigana always matches the audio. Fix bad readings by adding to
@@ -176,14 +234,18 @@ Adding a topic = add the JSON file **and** register it in `topics.py`.
 - `tests/conftest.py` points `AUTOTUTOR_HOME` at a temp directory before
   `autotutor.config` is imported, so the suite never touches real user
   settings. Keep it that way.
-- Network is never touched. The online back-ends are tested by monkeypatching
-  `get_json` / `get_text` / `Translator` in `content.online`
-  (`TestOnlineGeneratorWithStubs`).
+- Network is never touched. `TestOnlineGeneratorWithStubs` replaces
+  `sources.SOURCES` with fetchers that return canned `Article`s, so the tests
+  check *which source is chosen and how its text is cut down* rather than
+  re-testing ElementTree. Parsing has its own fixture-driven tests
+  (`TestFeedParsing`, `TestYouTubeCaptions`) that never construct a generator.
 - Tests that need speech are `skipif`-guarded on
   `get_engine("openjtalk").available()`.
-- Some sandboxes block `ja.wikipedia.org` and `www3.nhk.or.jp` at the egress
-  proxy (403 on CONNECT). That is an environment policy, not a bug — do not try
-  to route around it; use the stubs.
+- Some sandboxes block every Japanese content host at the egress proxy
+  (`ja.wikipedia.org`, `www3.nhk.or.jp`, `www.nhk.or.jp`, `ja.wikinews.org`,
+  `www.youtube.com`, the podcast CDNs) with a 403 on CONNECT. That is an
+  environment policy, not a bug — do not try to route around it; use the
+  fixtures, and say plainly that the live paths were not exercised.
 
 ## CI
 

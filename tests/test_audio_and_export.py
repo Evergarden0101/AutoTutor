@@ -16,7 +16,15 @@ from autotutor.export import (
     _srt_timestamp,
 )
 from autotutor.models import GenerationRequest, Lesson, RubySegment, Sentence
-from autotutor.tts import Narrator, SentenceTiming, available_engines, get_engine
+from autotutor.tts import (
+    Narrator,
+    SentenceTiming,
+    apply_voice_choice,
+    available_engines,
+    current_voice_choice,
+    get_engine,
+    list_voice_choices,
+)
 from autotutor.tts.audio import (
     Mp3Clip,
     PcmClip,
@@ -125,6 +133,52 @@ class TestEngines:
 
     def test_offline_filter_excludes_network_engines(self):
         assert all(not e.requires_network for e in available_engines(allow_online=False))
+
+
+class TestVoicePicker:
+    """The picker flattens engines and voices into one list for the toolbar."""
+
+    def test_offline_voices_come_first(self):
+        choices = list_voice_choices(allow_online=True)
+        if not choices:
+            pytest.skip("no speech engine available in this environment")
+        online_seen = False
+        for choice in choices:
+            if choice.requires_network:
+                online_seen = True
+            else:
+                assert not online_seen, "offline voices must be listed first"
+
+    def test_online_voices_are_hidden_when_networking_is_off(self):
+        assert all(not c.requires_network for c in list_voice_choices(allow_online=False))
+
+    def test_keys_are_unique_and_parse_back(self):
+        for choice in list_voice_choices(allow_online=True):
+            engine_id, _, voice_id = choice.key.partition(":")
+            assert engine_id == choice.engine_id and voice_id == choice.voice_id
+
+    def test_apply_writes_both_engine_and_voice(self):
+        settings = Settings()
+        apply_voice_choice(settings, "edge:ja-JP-KeitaNeural")
+        assert settings.tts_engine == "edge"
+        assert settings.edge_voice == "ja-JP-KeitaNeural"
+
+    def test_apply_ignores_an_unknown_engine(self):
+        settings = Settings()
+        before = settings.tts_engine
+        apply_voice_choice(settings, "nope:whatever")
+        assert settings.tts_engine == before
+
+    def test_round_trip(self):
+        settings = Settings()
+        apply_voice_choice(settings, "edge:ja-JP-AoiNeural")
+        assert current_voice_choice(settings) == "edge:ja-JP-AoiNeural"
+
+    def test_auto_resolves_to_a_concrete_voice(self):
+        """The toolbar has to show something, so "auto" is resolved eagerly."""
+        settings = Settings()
+        settings.tts_engine = "auto"
+        assert ":" in current_voice_choice(settings)
 
 
 @pytest.mark.skipif(

@@ -7,6 +7,7 @@ from tkinter import filedialog, ttk
 from typing import Callable, Optional
 
 from ..config import Settings
+from ..content.sources import AUTO_SOURCE_IDS, SOURCES, SOURCES_BY_ID
 from ..tts import list_engines
 from ..tts.edge import KNOWN_VOICES
 from .theme import Fonts, Palette
@@ -58,9 +59,11 @@ class SettingsDialog(tk.Toplevel):
         notebook.grid(row=0, column=0, sticky="nsew")
         speech = ttk.Frame(notebook, padding=16)
         network = ttk.Frame(notebook, padding=16)
+        sources = ttk.Frame(notebook, padding=16)
         files = ttk.Frame(notebook, padding=16)
         notebook.add(speech, text="  语音  ")
         notebook.add(network, text="  联网  ")
+        notebook.add(sources, text="  搜索来源  ")
         notebook.add(files, text="  文件与界面  ")
 
         # ---- speech ------------------------------------------------------
@@ -141,31 +144,35 @@ class SettingsDialog(tk.Toplevel):
         )
 
         ttk.Separator(network, orient="horizontal").grid(
-            row=4, column=0, columnspan=2, sticky="ew", pady=16
+            row=6, column=0, columnspan=2, sticky="ew", pady=16
         )
-        ttk.Label(network, text="Anthropic API Key（可选）").grid(row=5, column=0,
+        ttk.Label(network, text="Anthropic API Key（可选）").grid(row=7, column=0,
                                                                  columnspan=2, sticky="w")
         ttk.Label(
             network,
             text="填写后可使用「AI 生成」模式，按任意主题现写课文，翻译质量也更好。"
                  "密钥只保存在本机的设置文件里。",
             style="Muted.TLabel", wraplength=400, justify="left",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 6))
         self.var_key = tk.StringVar(value=s.anthropic_api_key)
         self.key_entry = ttk.Entry(network, textvariable=self.var_key, show="•", width=42)
-        self.key_entry.grid(row=7, column=0, sticky="ew")
+        self.key_entry.grid(row=9, column=0, sticky="ew")
         self.var_show_key = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             network, text="显示", variable=self.var_show_key, command=self._toggle_key,
-        ).grid(row=7, column=1, sticky="e", padx=(8, 0))
+        ).grid(row=9, column=1, sticky="e", padx=(8, 0))
 
-        ttk.Label(network, text="模型").grid(row=8, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(network, text="模型").grid(row=10, column=0, sticky="w", pady=(10, 0))
         self.var_model = tk.StringVar(value=s.anthropic_model)
         ttk.Combobox(
             network, textvariable=self.var_model, width=24,
             values=["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"],
-        ).grid(row=8, column=1, sticky="e", pady=(10, 0))
+        ).grid(row=10, column=1, sticky="e", pady=(10, 0))
         network.columnconfigure(0, weight=1)
+
+        # ---- search sources ----------------------------------------------
+        self._build_sources(sources)
+        sources.columnconfigure(0, weight=1)
 
         # ---- files / ui --------------------------------------------------
         ttk.Label(files, text="导出目录").grid(row=0, column=0, columnspan=2, sticky="w")
@@ -203,6 +210,50 @@ class SettingsDialog(tk.Toplevel):
         )
 
         self._update_engine_hint()
+
+    def _build_sources(self, parent: ttk.Frame) -> None:
+        """Per-source toggles for the online search.
+
+        Unticking everything is the same as ticking everything - a search with
+        no sources would simply always fail, which is never what anyone wants.
+        """
+        ttk.Label(
+            parent,
+            text="「联网搜索」会按顺序尝试下面勾选的来源，任何一个失败都会自动跳到下一个。",
+            style="Muted.TLabel", wraplength=420, justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        enabled = self.settings.enabled_source_ids()
+        self.var_sources = {}
+        row = 1
+        for source in SOURCES:
+            if source.id not in AUTO_SOURCE_IDS:
+                continue
+            var = tk.BooleanVar(value=source.id in enabled)
+            self.var_sources[source.id] = var
+            tag = "口语" if source.register == "spoken" else "书面"
+            ttk.Checkbutton(
+                parent, text=f"{source.label_zh}　·　{tag}", variable=var,
+            ).grid(row=row, column=0, sticky="w")
+            ttk.Label(
+                parent, text=source.note_zh, style="Muted.TLabel",
+                wraplength=400, justify="left",
+            ).grid(row=row + 1, column=0, sticky="w", padx=(24, 0), pady=(0, 6))
+            row += 2
+
+        ttk.Separator(parent, orient="horizontal").grid(
+            row=row, column=0, sticky="ew", pady=10
+        )
+        youtube = SOURCES_BY_ID.get("youtube")
+        if youtube:
+            ttk.Label(parent, text=f"{youtube.label_zh}　·　口语").grid(
+                row=row + 1, column=0, sticky="w"
+            )
+            ttk.Label(
+                parent,
+                text=youtube.note_zh + "在「主题领域」选「自定义主题」并粘贴链接即可，不需要勾选。",
+                style="Muted.TLabel", wraplength=400, justify="left",
+            ).grid(row=row + 2, column=0, sticky="w", padx=(24, 0), pady=(0, 6))
 
     def _slider(self, parent, row, label, variable, lo, hi, fmt) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(10, 0))
@@ -266,6 +317,10 @@ class SettingsDialog(tk.Toplevel):
         s.allow_online = bool(self.var_online.get())
         s.online_translate = bool(self.var_translate.get())
         s.request_timeout = int(self.var_timeout.get())
+        chosen = [sid for sid, var in self.var_sources.items() if var.get()]
+        # All ticked is stored as "no preference", so a source added in a later
+        # version is enabled rather than silently missing.
+        s.sources = "" if len(chosen) == len(self.var_sources) else ",".join(chosen)
         s.anthropic_api_key = self.var_key.get().strip()
         s.anthropic_model = self.var_model.get().strip() or "claude-sonnet-5"
 

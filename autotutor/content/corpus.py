@@ -20,12 +20,50 @@ class CorpusSentence:
     zh: str = ""
 
 
+# Register tags a passage can carry. "neutral" is the polite です/ます style
+# most textbook material is written in; it suits either request.
+REGISTER_SPOKEN = "spoken"
+REGISTER_WRITTEN = "written"
+REGISTER_NEUTRAL = "neutral"
+
+# Constructions that only appear in essays, editorials and encyclopedias.
+_WRITTEN_MARKERS = ("である", "であった", "ではない", "とされ", "であろう",
+                    "における", "に他ならない", "にほかならない", "べきである")
+
+
+def infer_register(sentences: Sequence[str]) -> str:
+    """Work out how formal a passage sounds, so it can be matched to a request.
+
+    Derived from the text rather than hand-tagged, so the corpus cannot drift
+    out of sync with its own labels. An explicit ``"register"`` in the JSON
+    always wins.
+
+    What counts as colloquial is defined once, in :mod:`..levels`, because the
+    difficulty model needs the same distinction: plain form on its own is not
+    literary Japanese.
+    """
+    from ..levels import analyse
+
+    text = "".join(sentences)
+    if not text:
+        return REGISTER_NEUTRAL
+    stats = analyse(text)
+    if stats.polite_ratio >= 0.5:
+        return REGISTER_NEUTRAL
+    if any(marker in text for marker in _WRITTEN_MARKERS):
+        return REGISTER_WRITTEN
+    if stats.casual_ratio > 0.0:
+        return REGISTER_SPOKEN
+    return REGISTER_WRITTEN
+
+
 @dataclass(frozen=True)
 class Passage:
     level: str
     title_ja: str
     title_zh: str
     sentences: List[CorpusSentence] = field(default_factory=list)
+    register: str = REGISTER_NEUTRAL
 
 
 @dataclass
@@ -35,8 +73,18 @@ class TopicCorpus:
     extras: Dict[str, List[CorpusSentence]] = field(default_factory=dict)
     vocab: Dict[str, List[Dict[str, str]]] = field(default_factory=dict)
 
-    def passages_for(self, level: str) -> List[Passage]:
-        return [p for p in self.passages if p.level == level]
+    def passages_for(self, level: str, register: str = "") -> List[Passage]:
+        """Passages for ``level``, optionally preferring a register.
+
+        A request for spoken or written Japanese falls back to the neutral
+        polite passages rather than returning nothing.
+        """
+        options = [p for p in self.passages if p.level == level]
+        if not register or register == "auto":
+            return options
+        wanted = [p for p in options if p.register == register]
+        neutral = [p for p in options if p.register == REGISTER_NEUTRAL]
+        return wanted + neutral
 
     def extras_for(self, level: str) -> List[CorpusSentence]:
         return list(self.extras.get(level, []))
@@ -72,19 +120,23 @@ def load_topic(topic_id: str) -> Optional[TopicCorpus]:
     except (OSError, ValueError):
         return None
 
-    passages = [
-        Passage(
-            level=str(p.get("level", "N4")).upper(),
-            title_ja=p.get("title_ja", ""),
-            title_zh=p.get("title_zh", ""),
-            sentences=[
-                CorpusSentence(s.get("ja", ""), s.get("zh", ""))
-                for s in p.get("sentences", [])
-                if s.get("ja")
-            ],
+    passages = []
+    for entry in raw.get("passages", []):
+        sentences = [
+            CorpusSentence(s.get("ja", ""), s.get("zh", ""))
+            for s in entry.get("sentences", [])
+            if s.get("ja")
+        ]
+        passages.append(
+            Passage(
+                level=str(entry.get("level", "N4")).upper(),
+                title_ja=entry.get("title_ja", ""),
+                title_zh=entry.get("title_zh", ""),
+                sentences=sentences,
+                register=entry.get("register")
+                or infer_register([s.ja for s in sentences]),
+            )
         )
-        for p in raw.get("passages", [])
-    ]
     extras = {
         str(level).upper(): [
             CorpusSentence(s.get("ja", ""), s.get("zh", ""))
@@ -116,14 +168,26 @@ def nearest_levels(level: str) -> List[str]:
     return sorted(LEVEL_CODES, key=lambda code: (abs(get_level(code).rank - rank), code))
 
 
-def frame_sentences(kind: str, level: str) -> List[Dict[str, str]]:
-    """Openers or closers for ``level`` with a graceful fallback."""
+def frame_sentences(kind: str, level: str, register: str = "") -> List[Dict[str, str]]:
+    """Openers or closers for ``level`` with a graceful fallback.
+
+    Frames carry an optional ``"register"``; untagged ones are the polite
+    default. A casual lesson that opened with みなさん、こんにちは would sound
+    like a different speaker to the body, so the composer asks for a matching
+    register and falls back to the polite frames when none exists.
+    """
     common = load_common()
     bucket = common.get(kind, {}) or {}
     for candidate in nearest_levels(level):
         items = bucket.get(candidate)
-        if items:
-            return list(items)
+        if not items:
+            continue
+        if register and register != REGISTER_NEUTRAL:
+            matched = [i for i in items if i.get("register") == register]
+            if matched:
+                return matched
+        default = [i for i in items if not i.get("register")]
+        return default or list(items)
     return []
 
 

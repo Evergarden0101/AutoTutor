@@ -187,6 +187,45 @@ class Lesson:
         return lesson
 
 
+# --------------------------------------------------------------------------
+# Register (how formal the Japanese sounds)
+# --------------------------------------------------------------------------
+
+REGISTER_AUTO = "auto"
+REGISTER_SPOKEN = "spoken"
+REGISTER_WRITTEN = "written"
+
+
+@dataclass(frozen=True)
+class RegisterOption:
+    """One choice in the 语体 selector."""
+
+    id: str
+    label_zh: str
+    label_ja: str
+    description_zh: str
+
+
+REGISTER_OPTIONS: List[RegisterOption] = [
+    RegisterOption(REGISTER_AUTO, "自动", "自動",
+                   "由级别和来源决定，通常是礼貌体（です・ます）。"),
+    RegisterOption(REGISTER_SPOKEN, "口语·日常", "話し言葉",
+                   "贴近日常会话：常体、语气词（ね・よ・んだ）、随意的说法。"),
+    RegisterOption(REGISTER_WRITTEN, "书面·正式", "書き言葉",
+                   "接近新闻和书面文章的文体：常体、书面连接词、名词化表达。"),
+]
+
+REGISTER_IDS = [r.id for r in REGISTER_OPTIONS]
+
+
+def get_register(register_id: str) -> Optional[RegisterOption]:
+    """Return the :class:`RegisterOption` for ``register_id``, if it exists."""
+    for option in REGISTER_OPTIONS:
+        if option.id == register_id:
+            return option
+    return None
+
+
 @dataclass
 class GenerationRequest:
     """Everything the UI collects before asking for a lesson."""
@@ -196,6 +235,7 @@ class GenerationRequest:
     custom_topic: str = ""
     length: str = "medium"  # see LENGTH_PRESETS
     source: str = "offline"  # offline | online | llm | custom
+    register: str = REGISTER_AUTO  # see REGISTER_OPTIONS
     custom_text: str = ""
     translate: bool = True
     seed: Optional[int] = None

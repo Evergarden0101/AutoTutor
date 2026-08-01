@@ -14,7 +14,14 @@ from typing import List, Tuple
 
 from ..config import Settings
 from ..levels import get_level
-from ..models import GenerationRequest, Lesson, target_seconds, target_sentence_count
+from ..models import (
+    REGISTER_SPOKEN,
+    REGISTER_WRITTEN,
+    GenerationRequest,
+    Lesson,
+    target_seconds,
+    target_sentence_count,
+)
 from ..net import NetworkError, post_json
 from ..topics import RANDOM_TOPIC, TOPICS, get_topic
 from .builder import build_lesson
@@ -35,6 +42,22 @@ def _topic_description(request: GenerationRequest) -> str:
     return "日常生活"
 
 
+def _register_instruction(register: str) -> str:
+    if register == REGISTER_SPOKEN:
+        return (
+            "Write it the way someone would actually talk to a friend: casual "
+            "plain forms, sentence-final particles (ね/よ/かな), contractions "
+            "(している -> してる), and small asides. Avoid newspaper vocabulary."
+        )
+    if register == REGISTER_WRITTEN:
+        return (
+            "Write it as polished written Japanese - the register of a news "
+            "feature or a magazine column - using だ/である style and formal "
+            "connectives."
+        )
+    return "Natural, spoken-style Japanese that sounds good when read aloud."
+
+
 def build_prompt(request: GenerationRequest, count: int, seconds: int) -> str:
     level = get_level(request.level)
     minutes = seconds / 60.0
@@ -46,7 +69,7 @@ def build_prompt(request: GenerationRequest, count: int, seconds: int) -> str:
         f"Length: about {count} sentences, so that reading it aloud at a natural "
         f"pace takes roughly {minutes:.0f} minute(s).\n\n"
         "Requirements:\n"
-        "- Natural, spoken-style Japanese that sounds good when read aloud.\n"
+        f"- {_register_instruction(request.register)}\n"
         "- Write developed paragraphs, not a list of disconnected one-line facts. "
         "Sentences should be full and substantial, using subordinate clauses and "
         "connectives so ideas link together into a continuous argument or story.\n"

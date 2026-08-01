@@ -16,7 +16,13 @@ from .console import configure_stdio
 from .content import generate_lesson
 from .export import export_bundle, lesson_to_text
 from .levels import LEVEL_CODES
-from .models import LENGTH_IDS, LENGTH_PRESETS, GenerationRequest
+from .models import (
+    LENGTH_IDS,
+    LENGTH_PRESETS,
+    REGISTER_IDS,
+    REGISTER_OPTIONS,
+    GenerationRequest,
+)
 from .topics import RANDOM_TOPIC, TOPIC_IDS
 from .version import APP_NAME, __version__
 
@@ -40,6 +46,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--source", choices=["offline", "online", "llm"], default=None)
+    parser.add_argument(
+        "--register", choices=REGISTER_IDS, default=None,
+        help="how formal the Japanese sounds: " + ", ".join(
+            f"{r.id} ({r.label_ja})" for r in REGISTER_OPTIONS
+        ),
+    )
     parser.add_argument("--out", default=None, help="output directory")
     parser.add_argument("--no-audio", action="store_true", help="skip speech synthesis")
     parser.add_argument("--seed", type=int, default=None, help="make the result repeatable")
@@ -64,6 +76,7 @@ def run_cli(args: argparse.Namespace) -> int:
         custom_topic=custom,
         length=args.length or settings.length,
         source=args.source or "offline",
+        register=args.register or settings.register,
         seed=args.seed,
     )
 
