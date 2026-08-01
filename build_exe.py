@@ -21,6 +21,17 @@ SPEC = ROOT / "AutoTutor.spec"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 
+# This script reports progress in Chinese, which the Windows default code page
+# cannot encode. autotutor.console only needs the standard library, so it is
+# importable even before the project dependencies are installed.
+sys.path.insert(0, str(ROOT))
+try:
+    from autotutor.console import configure_stdio
+
+    configure_stdio()
+except Exception:  # pragma: no cover - never let this stop a build
+    pass
+
 REQUIRED = [
     ("pyopenjtalk", "pyopenjtalk-plus"),
     ("lameenc", "lameenc"),

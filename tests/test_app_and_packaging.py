@@ -8,6 +8,8 @@ produces an executable that dies immediately with an ImportError.
 from __future__ import annotations
 
 import ast
+import io
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from autotutor.app import _build_parser, main
+from autotutor.console import _needs_utf8, configure_stdio
 from autotutor.version import APP_NAME, __version__
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +65,65 @@ class TestCliRun:
         ])
         assert code == 0
         assert any(p.suffix == ".txt" for p in tmp_path.iterdir())
+
+
+class TestConsoleEncoding:
+    """Guards the Windows failure mode: cp1252 stdout + Japanese output."""
+
+    def test_detects_streams_that_cannot_encode_cjk(self):
+        assert _needs_utf8(io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+        assert _needs_utf8(io.TextIOWrapper(io.BytesIO(), encoding="ascii"))
+
+    def test_leaves_capable_streams_alone(self):
+        assert not _needs_utf8(io.TextIOWrapper(io.BytesIO(), encoding="utf-8"))
+        assert not _needs_utf8(io.TextIOWrapper(io.BytesIO(), encoding="cp932"))
+
+    def test_tolerates_missing_streams(self):
+        assert _needs_utf8(None) is False
+
+    def test_configure_is_idempotent_and_safe(self):
+        configure_stdio()
+        configure_stdio()
+
+    def test_configure_survives_a_detached_stdout(self, monkeypatch):
+        monkeypatch.setattr(sys, "stdout", None)
+        configure_stdio()
+
+    def test_configure_switches_a_cp1252_stream(self, monkeypatch):
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        monkeypatch.setattr(sys, "stdout", stream)
+        configure_stdio(("stdout",))
+        assert stream.encoding.lower().replace("-", "") == "utf8"
+        stream.write("日本語・中文")  # would have raised under cp1252
+
+    @pytest.mark.parametrize("encoding", ["cp1252", "ascii"])
+    def test_cli_prints_japanese_on_a_legacy_code_page(self, tmp_path, encoding):
+        """Reproduces the CI failure: PYTHONIOENCODING forces a narrow codec."""
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = encoding
+        env["AUTOTUTOR_HOME"] = str(tmp_path / "home")
+        result = subprocess.run(
+            [sys.executable, "-m", "autotutor", "--cli", "--level", "N5",
+             "--topic", "daily_life", "--length", "short", "--no-audio",
+             "--out", str(tmp_path / "out")],
+            capture_output=True, text=True, timeout=300, cwd=str(ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
+
+    def test_launcher_prints_japanese_on_a_legacy_code_page(self, tmp_path):
+        """The frozen executable takes this path, not `python -m autotutor`."""
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env["AUTOTUTOR_HOME"] = str(tmp_path / "home")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "launcher.py"), "--cli", "--level", "N5",
+             "--topic", "hospital", "--length", "short", "--no-audio",
+             "--out", str(tmp_path / "out")],
+            capture_output=True, text=True, timeout=300, cwd=str(ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
 
 
 class TestPackaging:

@@ -15,6 +15,12 @@ import sys
 def main() -> int:
     # Harmless when unused; required if a frozen build ever spawns a process.
     multiprocessing.freeze_support()
+
+    # Fix the console encoding before any import can print a traceback.
+    from autotutor.console import configure_stdio
+
+    configure_stdio()
+
     from autotutor.app import main as run
 
     return run()

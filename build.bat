@@ -5,6 +5,10 @@ REM  Produces dist\AutoTutor.exe
 REM ---------------------------------------------------------------
 setlocal
 
+REM Switch the console to UTF-8 so the Chinese progress messages below,
+REM and anything the Python scripts print, render instead of crashing.
+chcp 65001 >nul 2>&1
+
 echo.
 echo ==== AutoTutor Windows build ====
 echo.

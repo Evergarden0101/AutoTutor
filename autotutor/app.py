@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import Settings
+from .console import configure_stdio
 from .content import generate_lesson
 from .export import export_bundle, lesson_to_text
 from .levels import LEVEL_CODES
@@ -89,6 +90,10 @@ def run_cli(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # Before anything is printed: the lessons are Japanese and the messages are
+    # Chinese, neither of which survives the Windows default code page.
+    configure_stdio()
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 

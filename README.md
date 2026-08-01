@@ -245,11 +245,12 @@ AutoTutor/
 │   ├── translate.py          Claude / Google / MyMemory back-ends
 │   ├── export.py             mp3, txt, html-with-ruby, srt, json
 │   ├── net.py                stdlib-only HTTP helper
+│   ├── console.py            UTF-8 stdio on legacy Windows code pages
 │   ├── content/              corpus · offline · online · llm · service
 │   ├── tts/                  audio · openjtalk · sapi5 · edge
 │   ├── ui/                   main_window · widgets · settings · theme
 │   └── data/corpus/          15 topics × 5 levels, 615 sentences
-├── tests/                    205 tests
+├── tests/                    226 tests
 ├── assets/make_icon.py       dependency-free icon generator
 ├── AutoTutor.spec            PyInstaller build
 ├── build_exe.py / build.bat  one-command builds
