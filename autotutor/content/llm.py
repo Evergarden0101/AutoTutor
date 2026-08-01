@@ -14,7 +14,7 @@ from typing import List, Tuple
 
 from ..config import Settings
 from ..levels import get_level
-from ..models import GenerationRequest, Lesson, target_sentence_count
+from ..models import GenerationRequest, Lesson, target_seconds, target_sentence_count
 from ..net import NetworkError, post_json
 from ..topics import RANDOM_TOPIC, TOPICS, get_topic
 from .builder import build_lesson
@@ -35,19 +35,25 @@ def _topic_description(request: GenerationRequest) -> str:
     return "日常生活"
 
 
-def build_prompt(request: GenerationRequest, count: int) -> str:
+def build_prompt(request: GenerationRequest, count: int, seconds: int) -> str:
     level = get_level(request.level)
+    minutes = seconds / 60.0
     return (
-        f"You are writing a Japanese listening-practice monologue for a JLPT {level.code} "
+        f"You are writing a Japanese listening-practice talk for a JLPT {level.code} "
         f"learner whose first language is Chinese.\n\n"
         f"Topic: {_topic_description(request)}\n"
         f"Level: {level.code} ({level.label_en}) - {level.style_hint}\n"
-        f"Length: exactly {count} sentences.\n\n"
+        f"Length: about {count} sentences, so that reading it aloud at a natural "
+        f"pace takes roughly {minutes:.0f} minute(s).\n\n"
         "Requirements:\n"
         "- Natural, spoken-style Japanese that sounds good when read aloud.\n"
-        "- One idea per sentence; the sentences must form a single coherent talk "
-        "with an opening and a closing line.\n"
-        f"- Keep vocabulary and grammar within JLPT {level.code}.\n"
+        "- Write developed paragraphs, not a list of disconnected one-line facts. "
+        "Sentences should be full and substantial, using subordinate clauses and "
+        "connectives so ideas link together into a continuous argument or story.\n"
+        "- The talk needs a clear structure: an opening, two or three developed "
+        "sections that build on each other, and a closing line.\n"
+        f"- Keep vocabulary and grammar within JLPT {level.code}. At {level.code}, "
+        "long sentences are fine as long as the grammar stays at that level.\n"
         "- Provide a natural Simplified Chinese translation for every sentence.\n"
         "- Do not use bullet points, headings, romaji or furigana.\n\n"
         "Return ONLY a JSON object with this exact shape:\n"
@@ -85,14 +91,14 @@ class LLMGenerator:
         if not self.available:
             raise LLMError("尚未设置 Anthropic API Key，无法使用 AI 生成模式。")
 
-        count = target_sentence_count(request.length)
-        prompt = build_prompt(request, count)
+        count = target_sentence_count(request.length, request.level)
+        prompt = build_prompt(request, count, target_seconds(request.length))
         try:
             data = post_json(
                 ENDPOINT,
                 {
                     "model": self.settings.anthropic_model,
-                    "max_tokens": 3000,
+                    "max_tokens": 8000,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=max(30, self.settings.request_timeout),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 
 @dataclass
@@ -138,8 +138,10 @@ class Lesson:
 
     @property
     def estimated_seconds(self) -> float:
-        """Rough narration length: Japanese TTS averages ~6.5 mora/second."""
-        return round(len(self.kana_text) / 6.5 + 0.6 * len(self.sentences), 1)
+        """Rough narration length, before the configured sentence pauses."""
+        return round(
+            estimate_seconds([s.kana or s.ja for s in self.sentences], is_kana=True), 1
+        )
 
     def slug(self) -> str:
         """Filesystem-friendly stem for exported files."""
@@ -192,7 +194,7 @@ class GenerationRequest:
     level: str = "N4"
     topic: str = "daily_life"
     custom_topic: str = ""
-    length: str = "medium"  # short | medium | long
+    length: str = "medium"  # see LENGTH_PRESETS
     source: str = "offline"  # offline | online | llm | custom
     custom_text: str = ""
     translate: bool = True
@@ -203,9 +205,80 @@ class GenerationRequest:
         """The free-text topic the user actually wants, if any."""
         return (self.custom_topic or "").strip()
 
+    @property
+    def target_seconds(self) -> int:
+        return target_seconds(self.length)
 
-SENTENCE_TARGETS: Dict[str, int] = {"short": 4, "medium": 8, "long": 14}
+
+# --------------------------------------------------------------------------
+# Narration length
+# --------------------------------------------------------------------------
+
+# Measured against the bundled Open JTalk voice over the corpus: 6.9 kana per
+# second including the small silence the engine puts around each sentence.
+KANA_PER_SECOND = 6.9
+# Japanese text averages 1.28 kana per written character (kanji expand).
+KANA_PER_CHAR = 1.28
+# Default gap the narrator inserts between sentences.
+DEFAULT_SENTENCE_GAP = 0.55
 
 
-def target_sentence_count(length: str) -> int:
-    return SENTENCE_TARGETS.get(length, SENTENCE_TARGETS["medium"])
+def estimate_seconds(
+    texts: Sequence[str],
+    is_kana: bool = False,
+    gap: float = DEFAULT_SENTENCE_GAP,
+) -> float:
+    """Estimate how long ``texts`` take to read aloud, in seconds."""
+    texts = [t for t in texts if t]
+    if not texts:
+        return 0.0
+    characters = sum(len(t) for t in texts)
+    mora = characters if is_kana else characters * KANA_PER_CHAR
+    return mora / KANA_PER_SECOND + gap * len(texts)
+
+
+@dataclass(frozen=True)
+class LengthPreset:
+    """A listening-length choice, expressed as a target narration duration."""
+
+    id: str
+    label_zh: str
+    minutes_zh: str
+    target_seconds: int
+
+    @property
+    def display(self) -> str:
+        return f"{self.label_zh} · {self.minutes_zh}"
+
+
+LENGTH_PRESETS: List[LengthPreset] = [
+    LengthPreset("short", "短", "1分", 60),
+    LengthPreset("medium", "中", "2分", 130),
+    LengthPreset("long", "长", "4分", 240),
+    LengthPreset("xlong", "超长", "8分", 450),
+]
+
+LENGTH_BY_ID: Dict[str, LengthPreset] = {p.id: p for p in LENGTH_PRESETS}
+LENGTH_IDS: List[str] = [p.id for p in LENGTH_PRESETS]
+
+
+def get_length(length: str) -> LengthPreset:
+    return LENGTH_BY_ID.get(length or "", LENGTH_BY_ID["medium"])
+
+
+def target_seconds(length: str) -> int:
+    return get_length(length).target_seconds
+
+
+def target_sentence_count(length: str, level: str = "N4") -> int:
+    """How many sentences the target duration works out to at ``level``.
+
+    Used by the back-ends that must ask for a sentence count up front (the web
+    search window and the LLM prompt) rather than growing until they are full.
+    """
+    from .levels import get_level
+
+    # Typical sentence length in characters at each level, from the corpus.
+    typical_chars = {1: 26, 2: 34, 3: 44, 4: 54, 5: 60}[get_level(level).rank]
+    per_sentence = typical_chars * KANA_PER_CHAR / KANA_PER_SECOND + DEFAULT_SENTENCE_GAP
+    return max(3, int(round(target_seconds(length) / per_sentence)))

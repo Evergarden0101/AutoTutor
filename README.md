@@ -33,11 +33,13 @@ adds extra sources.
 
 | | |
 |---|---|
-| **Level-aware content** | JLPT **N5 → N1**. Vocabulary, grammar and sentence length all change with the level, and the narration slows down for beginners. |
+| **Level-aware content** | JLPT **N5 → N1**. Vocabulary, grammar and sentence length all change with the level, and the narration slows down for beginners. Passages are developed paragraphs, not lists of one-line facts. |
 | **15 topic fields** | Daily life · Food · Travel · School · Work · Shopping · Hospital · Games · Anime & manga · Programming · Technology · Sports · Music · Weather · Japanese culture — plus *random* and *free-text* topics. |
 | **Furigana on every kanji** | Readings come from the same Open JTalk dictionary that produces the audio, so what you read is exactly what you hear. Four display modes: ruby, `漢字(かんじ)`, kanji only, kana only. |
-| **Chinese translation** | The 615 bundled sentences ship with hand-written Simplified Chinese. Web and custom text are translated online. |
+| **Chinese translation** | The 750 bundled sentences ship with hand-written Simplified Chinese. Web and custom text are translated online. |
+| **Pick the length you want** | Four targets — about **1, 2, 4 or 8 minutes** of narration. The composer keeps adding material, with spoken transitions, until it reaches the target. |
 | **Clear narration → MP3** | Offline Open JTalk voice, Windows system voices, or Microsoft Edge neural voices. Adjustable speed, sentence pauses and per-sentence repeats. |
+| **Follow along while it reads** | The sentence being spoken is marked with a ▶ in the gutter and highlighted, and the status bar shows `第 3 / 17 句　00:16 / 02:17` with a progress bar. |
 | **Truly offline** | The voice model and dictionary are bundled *inside* the executable. No account, no API key, no download on first run. |
 | **Optional online mode** | Search NHK News Web Easy and Japanese Wikipedia for real articles, filtered to your level. |
 
@@ -46,6 +48,7 @@ adds extra sources.
 
 ![Dark theme, N1 lesson](docs/screenshot-dark.png)
 ![Settings](docs/screenshot-settings.png)
+![A generated lesson](docs/screenshot-reading.png)
 
 </details>
 
@@ -84,11 +87,11 @@ include Tk; on Debian/Ubuntu run `sudo apt install python3-tk`.
    level means in practice.
 2. **主题领域** — pick a bundled topic, `— 随机主题 —` for a surprise, or
    `— 自定义主题 —` and type anything you like.
-3. **课文长度** — short (~4 sentences), medium (~8) or long (~14).
+3. **音频长度** — how long you want the narration to be: 短 (~1 min), 中 (~2 min), 长 (~4 min) or 超长 (~8 min).
 4. **内容来源** — see [Content sources](#content-sources) below.
 5. Press **生成课文** (or `Ctrl+G`). The text appears immediately and the audio is
    synthesised in the background.
-6. **▶ 播放** (`Ctrl+P`) reads it aloud and highlights the sentence being spoken.
+6. **▶ 播放** (`Ctrl+P`) reads it aloud, marking and highlighting the sentence being spoken and showing elapsed/total time.
 7. **导出…** (`Ctrl+E`) writes the MP3 and study materials wherever you want.
 
 The **注音显示** row switches between furigana, `漢字(かんじ)`, plain kanji and kana-only —
@@ -100,7 +103,7 @@ useful for testing yourself: listen first with the kanji hidden, then reveal.
 
 | Mode | Network | What it does |
 |---|---|---|
-| **离线语料** | never | Composes a talk from the bundled corpus: a level-appropriate opening line, a themed passage, extra sentences joined with connectives, and a closing line. Every sentence has a human-written Chinese translation. |
+| **离线语料** | never | Composes a talk from the bundled corpus: a level-appropriate opening, one or more themed passages joined by spoken transitions, and a closing line — enough material to fill the length you asked for. Every sentence has a human-written Chinese translation. |
 | **联网搜索** | required | Searches **NHK News Web Easy** (for N5/N4) and **Japanese Wikipedia**, splits articles into sentences, and slides a window across them to find the passage closest to your level. Translated automatically. |
 | **AI 生成** | required + API key | Asks Claude to write a brand-new passage at exactly your level about any topic. Set the key in **设置 → 联网**. |
 | **自备文本** | optional | Paste your own Japanese into the 自备文本 tab and get furigana, translation and audio for it. |
@@ -158,8 +161,11 @@ a GitHub release also attaches the exe to it.
 Useful for batch-generating practice material:
 
 ```bash
-# One N4 lesson about anime, exported to ./out
+# One N4 lesson about anime (~2 minutes of audio), exported to ./out
 python -m autotutor --cli --level N4 --topic anime --length medium --out ./out
+
+# An 8-minute listening session
+python -m autotutor --cli --level N3 --topic technology --length xlong
 
 # A random topic, reproducible via --seed
 python -m autotutor --cli --level N5 --topic random --seed 42
@@ -189,12 +195,19 @@ surface so that okurigana stays outside the ruby — `食べます` + `タベマ
 `食(た)べます`, not `食べます(たべます)`. A small override table fixes readings the
 analysers get wrong in isolation (`日本語` → にほんご, `二人` → ふたり, `七時` → しちじ).
 
-**Difficulty.** `score_text()` is a five-feature linear model — kanji sophistication,
-sentence length, kanji density, compound-word density, and whether the text uses plain
-written style instead of です/ます. The weights were fitted by least squares against the
-615 level-labelled corpus sentences; it explains 87 % of the variance there and lands
-within one JLPT level 97 % of the time. It drives the online window picker and the
-"this text is harder than your level" warning.
+**Difficulty.** `score_text()` is a four-feature linear model — kanji sophistication,
+sentence length, compound-word density, and whether the text uses plain written style
+instead of です/ます. The weights were fitted by least squares against the 750
+level-labelled corpus sentences; it explains 82 % of the variance there and lands within
+one JLPT level 95 % of the time. It drives the online window picker and the "this text is
+harder than your level" warning.
+
+**Length.** Narration speed was measured against the bundled voice at 6.9 kana/second, so
+a target duration converts directly into an amount of text. The offline composer widens
+its search in a fixed order — more passages on the topic, then neighbouring levels of the
+same topic, then a related topic — and says in the lesson notes whenever it had to step
+outside the level you asked for. The online search grows its window and merges further
+articles the same way.
 
 *Honest limitation:* surface statistics barely separate N2 from N1 — both score around
 4.4. Treat the estimate as a ranking signal, not a verdict.
@@ -249,8 +262,8 @@ AutoTutor/
 │   ├── content/              corpus · offline · online · llm · service
 │   ├── tts/                  audio · openjtalk · sapi5 · edge
 │   ├── ui/                   main_window · widgets · settings · theme
-│   └── data/corpus/          15 topics × 5 levels, 615 sentences
-├── tests/                    226 tests
+│   └── data/corpus/          15 topics × 5 levels, 750 sentences
+├── tests/                    258 tests
 ├── assets/make_icon.py       dependency-free icon generator
 ├── AutoTutor.spec            PyInstaller build
 ├── build_exe.py / build.bat  one-command builds
@@ -280,5 +293,5 @@ It stands on:
   Fetched content belongs to its respective rights holders; the app links back to every
   article it uses. Wikipedia text is CC BY-SA.
 
-The bundled corpus (615 Japanese sentences with Chinese translations) was written for this
+The bundled corpus (750 Japanese sentences with Chinese translations) was written for this
 project and is covered by the project licence.

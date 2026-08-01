@@ -7,12 +7,12 @@ The estimator is used in two places:
 * to warn the learner when a custom text they pasted is far from the level
   they selected.
 
-The score is a small linear model over five surface features (kanji
-sophistication, sentence length, kanji density, compound-word density and
-whether the text uses plain written style rather than です/ます).  Its weights
-were fitted by least squares against the 615 level-labelled sentences in the
-bundled corpus; on that data it explains 87% of the variance and lands within
-one JLPT level 97% of the time.
+The score is a small linear model over four surface features (kanji
+sophistication, sentence length, compound-word density and whether the text
+uses plain written style rather than です/ます).  Its weights were fitted by
+least squares against the 750 level-labelled sentences in the bundled corpus;
+on that data it explains 82% of the variance and lands within one JLPT level
+95% of the time.
 
 Two caveats worth knowing: the kanji bands below follow the widely circulated
 JLPT kanji lists rather than an official specification, and surface statistics
@@ -60,12 +60,12 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?])\s*")
 _POLITE_END_RE = re.compile(r"(ます|ました|ません|でしょう|です|でした|ください)[。！？!?]?$")
 
 # Least-squares weights fitted against the bundled level-labelled corpus.
-_W_KANJI_BAND = 0.235
-_W_SENTENCE_LEN = 0.807
-_W_KANJI_RATIO = 0.374
-_W_COMPOUND = 0.107
-_W_WRITTEN_STYLE = 1.415
-_W_INTERCEPT = -0.457
+# Refit after the corpus was rewritten with longer, paragraph-style passages.
+_W_KANJI_BAND = 0.439
+_W_SENTENCE_LEN = 0.602
+_W_COMPOUND = 0.144
+_W_WRITTEN_STYLE = 1.749
+_W_INTERCEPT = -0.906
 
 
 @dataclass(frozen=True)
@@ -258,7 +258,6 @@ def score_text(text: str) -> float:
     score = (
         _W_KANJI_BAND * stats.mean_kanji_band
         + _W_SENTENCE_LEN * min(6.0, stats.avg_sentence_chars / 10.0)
-        + _W_KANJI_RATIO * stats.kanji_ratio
         + _W_COMPOUND * stats.compound_ratio
         + _W_WRITTEN_STYLE * (1.0 - stats.polite_ratio)
         + _W_INTERCEPT

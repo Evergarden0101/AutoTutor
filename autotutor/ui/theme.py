@@ -11,7 +11,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import font as tkfont
 from tkinter import ttk
-from typing import Sequence
+from typing import List, Sequence
 
 # Ordered by preference; the first family present on the system wins.
 JP_FONTS: Sequence[str] = (
@@ -260,8 +260,98 @@ def apply_theme(root: tk.Tk, palette: Palette, fonts: Fonts) -> ttk.Style:
         relief="flat",
     )
     style.map("Vertical.TScrollbar", background=[("active", palette.border)])
+
+    install_check_indicator(root, style, palette)
     return style
 
 
 def palette_for(name: str) -> Palette:
     return DARK if (name or "").lower() == "dark" else LIGHT
+
+
+# --------------------------------------------------------------------------
+# Check marks
+# --------------------------------------------------------------------------
+
+# The clam theme draws a diagonal cross in a ticked checkbox, which reads as
+# "wrong" rather than "on". These images replace it with a real check mark.
+# Tk garbage-collects PhotoImage objects that nothing references, so the ones
+# in use are kept alive here.
+_CHECK_IMAGES: List[tk.PhotoImage] = []
+_CHECK_SERIAL = [0]
+
+
+def _draw_box(image: tk.PhotoImage, size: int, palette: Palette, fill: str) -> None:
+    """Rounded-ish square: a filled box with the corner pixels left blank."""
+    image.put(palette.bg, to=(0, 0, size, size))
+    image.put(fill, to=(1, 1, size - 1, size - 1))
+    for x, y in ((1, 1), (size - 2, 1), (1, size - 2), (size - 2, size - 2)):
+        image.put(palette.bg, to=(x, y, x + 1, y + 1))
+
+
+def _draw_check(image: tk.PhotoImage, size: int, colour: str) -> None:
+    """A two-stroke check mark scaled to ``size``."""
+    scale = size / 16.0
+
+    def stroke(x0: float, y0: float, x1: float, y1: float) -> None:
+        steps = max(2, int(max(abs(x1 - x0), abs(y1 - y0)) * 3))
+        for step in range(steps + 1):
+            t = step / steps
+            x = int(round(x0 + (x1 - x0) * t))
+            y = int(round(y0 + (y1 - y0) * t))
+            # 2px pen so the mark stays visible at small sizes.
+            for dx in (0, 1):
+                for dy in (0, 1):
+                    px, py = x + dx, y + dy
+                    if 1 <= px < size - 1 and 1 <= py < size - 1:
+                        image.put(colour, to=(px, py, px + 1, py + 1))
+
+    stroke(3.5 * scale, 8.0 * scale, 6.5 * scale, 11.0 * scale)
+    stroke(6.5 * scale, 11.0 * scale, 12.0 * scale, 4.5 * scale)
+
+
+def install_check_indicator(root: tk.Misc, style: ttk.Style, palette: Palette,
+                            size: int = 16) -> None:
+    """Point ttk check buttons at a drawn check mark instead of clam's cross."""
+    try:
+        unchecked = tk.PhotoImage(master=root, width=size, height=size)
+        checked = tk.PhotoImage(master=root, width=size, height=size)
+    except tk.TclError:  # pragma: no cover - no display
+        return
+
+    _draw_box(unchecked, size, palette, palette.surface)
+    _draw_box(checked, size, palette, palette.accent)
+    _draw_check(checked, size, palette.accent_text)
+
+    _CHECK_IMAGES.clear()
+    _CHECK_IMAGES.extend([unchecked, checked])
+
+    # An element name can only be created once per interpreter, so each theme
+    # change registers a fresh one.
+    _CHECK_SERIAL[0] += 1
+    element = f"AutoTutorCheck{_CHECK_SERIAL[0]}.indicator"
+    try:
+        style.element_create(
+            element, "image", unchecked,
+            ("selected", checked),
+            ("alternate", checked),
+            sticky="", padding=1,
+        )
+    except tk.TclError:  # pragma: no cover - element already present
+        return
+
+    style.layout(
+        "TCheckbutton",
+        [
+            ("Checkbutton.padding", {
+                "sticky": "nswe",
+                "children": [
+                    (element, {"side": "left", "sticky": ""}),
+                    ("Checkbutton.focus", {
+                        "side": "left", "sticky": "w",
+                        "children": [("Checkbutton.label", {"sticky": "nswe"})],
+                    }),
+                ],
+            }),
+        ],
+    )

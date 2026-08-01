@@ -8,11 +8,14 @@ import pytest
 
 from autotutor.config import Settings, data_dir, resource_root
 from autotutor.models import (
+    LENGTH_IDS,
     GenerationRequest,
     Lesson,
     RubySegment,
     Sentence,
     VocabEntry,
+    estimate_seconds,
+    target_seconds,
     target_sentence_count,
 )
 
@@ -145,8 +148,25 @@ class TestRequest:
     def test_topic_query_is_trimmed(self):
         assert GenerationRequest(custom_topic="  料理 ").topic_query == "料理"
 
-    @pytest.mark.parametrize(
-        "length,expected", [("short", 4), ("medium", 8), ("long", 14), ("odd", 8)]
-    )
-    def test_target_sentence_count(self, length, expected):
-        assert target_sentence_count(length) == expected
+    @pytest.mark.parametrize("length", LENGTH_IDS)
+    def test_target_seconds_increases_with_length(self, length):
+        assert target_seconds(length) >= 60
+
+    def test_length_presets_are_ordered(self):
+        seconds = [target_seconds(i) for i in LENGTH_IDS]
+        assert seconds == sorted(seconds)
+        assert seconds[-1] >= 360, "the longest preset should reach 6+ minutes"
+
+    def test_unknown_length_falls_back_to_medium(self):
+        assert target_seconds("nonsense") == target_seconds("medium")
+
+    def test_sentence_count_follows_duration_and_level(self):
+        # Longer target -> more sentences; harder level -> fewer, longer ones.
+        assert target_sentence_count("xlong", "N4") > target_sentence_count("short", "N4")
+        assert target_sentence_count("long", "N5") > target_sentence_count("long", "N1")
+
+    def test_estimate_seconds(self):
+        assert estimate_seconds([]) == 0.0
+        one = estimate_seconds(["これは十文字ほどの文です。"])
+        two = estimate_seconds(["これは十文字ほどの文です。"] * 2)
+        assert two > one > 0

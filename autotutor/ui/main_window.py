@@ -17,7 +17,7 @@ from ..content import generate_lesson
 from ..content.corpus import corpus_stats
 from ..export import export_bundle
 from ..levels import LEVEL_CODES, LEVELS, get_level
-from ..models import GenerationRequest, Lesson
+from ..models import LENGTH_PRESETS, GenerationRequest, Lesson, get_length
 from ..reading import reader_name
 from ..topics import CUSTOM_TOPIC, RANDOM_TOPIC, all_topics
 from ..tts import Narrator, NarrationResult, Player, list_engines
@@ -33,7 +33,7 @@ from .widgets import (
     StatusBar,
 )
 
-LENGTH_OPTIONS = (("short", "短 (~4句)"), ("medium", "中 (~8句)"), ("long", "长 (~14句)"))
+LENGTH_OPTIONS = tuple((p.id, p.display) for p in LENGTH_PRESETS)
 SOURCE_OPTIONS = (
     ("offline", "离线语料"),
     ("online", "联网搜索"),
@@ -119,30 +119,36 @@ class AutoTutorApp(tk.Tk):
         card.grid(row=1, column=0, sticky="ew", pady=(10, 10))
         card.columnconfigure(1, weight=1)
 
-        # -- level + length (one row) --------------------------------------
+        # -- level ---------------------------------------------------------
         ttk.Label(card, text="日语级别").grid(row=0, column=0, sticky="w", padx=(0, 12))
-        row_level = ttk.Frame(card)
-        row_level.grid(row=0, column=1, sticky="ew")
-        row_level.columnconfigure(1, weight=1)
-
         self.var_level = tk.StringVar(value=self.settings.level)
         level_options = [(code, f"{code} · {LEVELS[code].label_zh}") for code in LEVEL_CODES]
-        SegmentedControl(row_level, level_options, self.var_level, self._on_level_change).grid(
-            row=0, column=0, sticky="w"
+        SegmentedControl(card, level_options, self.var_level, self._on_level_change).grid(
+            row=0, column=1, sticky="w"
         )
-        length_frame = ttk.Frame(row_level)
-        length_frame.grid(row=0, column=2, sticky="e")
-        ttk.Label(length_frame, text="长度").grid(row=0, column=0, padx=(0, 8))
-        self.var_length = tk.StringVar(value=self.settings.length)
-        SegmentedControl(length_frame, LENGTH_OPTIONS, self.var_length).grid(row=0, column=1)
 
         self.level_hint = ttk.Label(card, text="", style="Muted.TLabel", justify="left")
         self.level_hint.grid(row=1, column=1, sticky="w", pady=(3, 9))
 
+        # -- audio length ----------------------------------------------------
+        ttk.Label(card, text="音频长度").grid(row=2, column=0, sticky="w", padx=(0, 12))
+        length_frame = ttk.Frame(card)
+        length_frame.grid(row=2, column=1, sticky="w")
+        self.var_length = tk.StringVar(value=self.settings.length)
+        SegmentedControl(
+            length_frame, LENGTH_OPTIONS, self.var_length,
+            lambda _v: self._on_level_change(self.var_level.get()),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            length_frame, text="（朗读时长目标，内容会自动加长到接近这个时间）",
+            style="Muted.TLabel",
+        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
+
         # -- topic ---------------------------------------------------------
-        ttk.Label(card, text="主题领域").grid(row=2, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(card, text="主题领域").grid(row=3, column=0, sticky="w", padx=(0, 12),
+                                              pady=(9, 0))
         topic_frame = ttk.Frame(card)
-        topic_frame.grid(row=2, column=1, sticky="ew")
+        topic_frame.grid(row=3, column=1, sticky="ew", pady=(9, 0))
         topic_frame.columnconfigure(1, weight=1)
 
         self._topic_ids: List[str] = [t.id for t in all_topics()] + [RANDOM_TOPIC, CUSTOM_TOPIC]
@@ -169,19 +175,19 @@ class AutoTutorApp(tk.Tk):
         )
 
         # -- source --------------------------------------------------------
-        ttk.Label(card, text="内容来源").grid(row=3, column=0, sticky="w", padx=(0, 12),
+        ttk.Label(card, text="内容来源").grid(row=4, column=0, sticky="w", padx=(0, 12),
                                               pady=(9, 0))
         self.var_source = tk.StringVar(value=self.settings.source)
         SegmentedControl(card, SOURCE_OPTIONS, self.var_source, self._on_source_change).grid(
-            row=3, column=1, sticky="w", pady=(9, 0)
+            row=4, column=1, sticky="w", pady=(9, 0)
         )
         self.source_hint = ttk.Label(card, text="", style="Muted.TLabel", wraplength=820,
                                      justify="left")
-        self.source_hint.grid(row=4, column=1, sticky="w", pady=(3, 0))
+        self.source_hint.grid(row=5, column=1, sticky="w", pady=(3, 0))
 
         # -- actions -------------------------------------------------------
         actions = ttk.Frame(card)
-        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         actions.columnconfigure(4, weight=1)
 
         self.btn_generate = ttk.Button(
@@ -258,8 +264,11 @@ class AutoTutorApp(tk.Tk):
 
     def _on_level_change(self, code: str) -> None:
         level = get_level(code)
+        preset = get_length(self.var_length.get())
+        minutes, seconds = divmod(preset.target_seconds, 60)
         self.level_hint.configure(
             text=f"{level.label_zh} / {level.label_en} — {level.description_zh}"
+                 f"　·　目标时长约 {minutes} 分 {seconds:02d} 秒"
         )
 
     def _on_topic_change(self) -> None:
@@ -498,33 +507,48 @@ class AutoTutorApp(tk.Tk):
             messagebox.showerror(APP_NAME, f"播放失败：\n{exc}", parent=self)
             return
         self.btn_stop.configure(state="normal")
-        self.status.set("正在播放…")
+        self.status.start("正在播放…", determinate=True)
         self._play_started = time.monotonic()
         self._track_playback()
 
     def _track_playback(self) -> None:
-        """Highlight the sentence currently being read."""
+        """Show where the narration has got to: marker, highlight and clock."""
         if self._play_job:
             self.after_cancel(self._play_job)
             self._play_job = None
         if not self.narration or not self.narration.has_timings:
             return
-        elapsed = time.monotonic() - self._play_started
+
+        total = self.narration.duration
+        elapsed = min(time.monotonic() - self._play_started, total)
+
         current = None
+        spoken = 0
         for timing in self.narration.timings:
+            if timing.start <= elapsed:
+                spoken = timing.index + 1
             if timing.start <= elapsed < timing.end:
                 current = timing.index
                 break
+
         self.lesson_view.highlight(current)
-        if elapsed <= self.narration.duration + 0.5 and self.player.is_playing():
+        count = len(self.lesson.sentences) if self.lesson else len(self.narration.timings)
+        self.status.step(100.0 * elapsed / total if total else 0.0)
+        self.status.set(
+            f"▶ 正在朗读　第 {max(1, spoken)} / {count} 句　"
+            f"{_clock(elapsed)} / {_clock(total)}"
+        )
+
+        if elapsed < total and self.player.is_playing():
             self._play_job = self.after(120, self._track_playback)
         else:
             self.lesson_view.highlight(None)
             self.btn_stop.configure(state="disabled")
-            self.status.set("播放结束")
+            self.status.stop(f"播放结束　·　共 {_clock(total)}")
 
     def stop(self) -> None:
         self._cancel.set()
+        was_playing = self._play_job is not None
         if self._play_job:
             self.after_cancel(self._play_job)
             self._play_job = None
@@ -534,6 +558,8 @@ class AutoTutorApp(tk.Tk):
             self.log(f"停止播放时出错：{exc}")
         self.lesson_view.highlight(None)
         self.btn_stop.configure(state="disabled")
+        if was_playing:
+            self.status.stop("已停止播放")
 
     # ------------------------------------------------------------------
     # Export
@@ -765,6 +791,11 @@ class ExportDialog(tk.Toplevel):
         self.settings.save()
         self.confirmed = True
         self.destroy()
+
+
+def _clock(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
 def run() -> None:

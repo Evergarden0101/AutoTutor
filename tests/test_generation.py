@@ -15,7 +15,7 @@ from autotutor.content.online import (
     extract_nhk_body,
     strip_html,
 )
-from autotutor.models import GenerationRequest, target_sentence_count
+from autotutor.models import LENGTH_IDS, GenerationRequest, target_seconds
 from autotutor.topics import CUSTOM_TOPIC, RANDOM_TOPIC, TOPIC_IDS
 
 
@@ -28,11 +28,42 @@ def offline_settings():
 
 class TestOfflineGeneration:
     @pytest.mark.parametrize("level", ["N5", "N4", "N3", "N2", "N1"])
-    @pytest.mark.parametrize("length", ["short", "medium", "long"])
-    def test_length_matches_the_request(self, offline_settings, level, length):
+    @pytest.mark.parametrize("length", LENGTH_IDS)
+    def test_duration_is_close_to_the_requested_length(
+        self, offline_settings, level, length
+    ):
         request = GenerationRequest(level=level, topic="daily_life", length=length, seed=1)
         lesson = generate_lesson(request, offline_settings)
-        assert len(lesson.sentences) == target_sentence_count(length)
+        target = target_seconds(length)
+        assert 0.7 * target <= lesson.estimated_seconds <= 1.35 * target, (
+            f"{level}/{length}: {lesson.estimated_seconds}s vs target {target}s"
+        )
+
+    def test_longer_presets_produce_longer_lessons(self, offline_settings):
+        durations = [
+            generate_lesson(
+                GenerationRequest(level="N4", topic="travel", length=length, seed=9),
+                offline_settings,
+            ).estimated_seconds
+            for length in LENGTH_IDS
+        ]
+        assert durations == sorted(durations), durations
+
+    def test_can_reach_eight_minutes(self, offline_settings):
+        lesson = generate_lesson(
+            GenerationRequest(level="N3", topic="anime", length="xlong", seed=2),
+            offline_settings,
+        )
+        assert lesson.estimated_seconds >= 300, lesson.estimated_seconds
+
+    def test_sentences_are_substantial_not_choppy(self, offline_settings):
+        """The corpus should read as paragraphs, not one-line facts."""
+        lesson = generate_lesson(
+            GenerationRequest(level="N3", topic="programming", length="medium", seed=1),
+            offline_settings,
+        )
+        lengths = [len(s.ja) for s in lesson.sentences]
+        assert sum(lengths) / len(lengths) >= 28, lengths
 
     @pytest.mark.parametrize("topic_id", TOPIC_IDS)
     def test_every_topic_generates(self, offline_settings, topic_id):

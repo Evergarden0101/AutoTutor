@@ -1,17 +1,24 @@
 """The fully offline lesson composer.
 
-Builds a coherent monologue out of the bundled corpus: a level-appropriate
-opening line, a themed passage, optional extra sentences joined with
-connectives, and a closing line.  Nothing here touches the network.
+Builds a coherent talk out of the bundled corpus and keeps adding material
+until the requested narration length is reached: an opening line, one or more
+themed passages joined by spoken transitions, and a closing line.  Nothing
+here touches the network.
+
+For the longer presets a single passage is not enough, so the composer widens
+its search in a deliberate order - more passages on the same topic, then
+neighbouring levels of the same topic, then a related topic - and records in
+``lesson.warnings`` whenever it had to step outside the requested level.
 """
 
 from __future__ import annotations
 
 import random
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Deque, List, Optional, Tuple
 
-from ..models import GenerationRequest, Lesson, target_sentence_count
+from ..models import GenerationRequest, Lesson, estimate_seconds, target_seconds
 from ..topics import CUSTOM_TOPIC, RANDOM_TOPIC, TOPICS, Topic, get_topic
 from .builder import build_lesson
 from .corpus import (
@@ -26,7 +33,25 @@ from .corpus import (
     nearest_levels,
 )
 
-_RECENT_LIMIT = 12
+_RECENT_LIMIT = 24
+
+Pair = Tuple[str, str]
+
+
+@dataclass
+class _Block:
+    """A run of sentences that belongs together, plus how to introduce it."""
+
+    pairs: List[Pair] = field(default_factory=list)
+    topic_id: str = ""
+    level: str = ""
+    title_ja: str = ""
+    title_zh: str = ""
+    needs_transition: bool = False
+
+    @property
+    def seconds(self) -> float:
+        return estimate_seconds([ja for ja, _ in self.pairs])
 
 
 class OfflineGenerator:
@@ -64,36 +89,65 @@ class OfflineGenerator:
             return request.topic, warnings
 
         matched = match_topic(request.topic, topic_ids)
-        if matched:
-            return matched, warnings
-        return self.rng.choice(topic_ids), warnings
+        return (matched or self.rng.choice(topic_ids)), warnings
 
-    # -- composition -------------------------------------------------------
-    def _pick_passage(self, corpus: TopicCorpus, level: str) -> Optional[Passage]:
-        for candidate_level in nearest_levels(level):
-            options = corpus.passages_for(candidate_level)
-            if not options:
-                continue
-            fresh = [
-                p for p in options
-                if f"{corpus.id}:{p.level}:{p.title_ja}" not in self._recent
-            ]
-            passage = self.rng.choice(fresh or options)
-            self._recent.append(f"{corpus.id}:{passage.level}:{passage.title_ja}")
-            return passage
-        return None
+    # -- building blocks ---------------------------------------------------
+    def _key(self, corpus_id: str, passage: Passage) -> str:
+        return f"{corpus_id}:{passage.level}:{passage.title_ja}"
 
-    def _extra_pool(self, corpus: TopicCorpus, level: str, wanted: int) -> List[CorpusSentence]:
-        pool: List[CorpusSentence] = []
-        for candidate_level in nearest_levels(level):
-            items = corpus.extras_for(candidate_level)
-            self.rng.shuffle(items)
-            pool.extend(items)
-            if len(pool) >= wanted:
-                break
-        return pool[:wanted]
+    def _passage_blocks(
+        self, corpus: TopicCorpus, level: str, exclude: set
+    ) -> List[_Block]:
+        """Every unused passage for ``level``, in random order."""
+        options = [
+            p for p in corpus.passages_for(level)
+            if self._key(corpus.id, p) not in exclude
+        ]
+        self.rng.shuffle(options)
+        return [
+            _Block(
+                pairs=[(s.ja, s.zh) for s in passage.sentences],
+                topic_id=corpus.id,
+                level=passage.level,
+                title_ja=passage.title_ja,
+                title_zh=passage.title_zh,
+            )
+            for passage in options
+            if passage.sentences
+        ]
 
-    def _frame(self, kind: str, level: str, topic: Optional[Topic]) -> Optional[Tuple[str, str]]:
+    def _extras_block(self, corpus: TopicCorpus, level: str) -> Optional[_Block]:
+        """Loose sentences for ``level``, joined with connectives."""
+        items: List[CorpusSentence] = corpus.extras_for(level)
+        if not items:
+            return None
+        self.rng.shuffle(items)
+        joiners = connectives(level) or [""]
+        pairs: List[Pair] = []
+        for extra in items:
+            joiner = self.rng.choice(joiners)
+            ja = extra.ja
+            if joiner and not ja.startswith(joiner):
+                ja = joiner + ja
+            pairs.append((ja, extra.zh))
+        return _Block(pairs=pairs, topic_id=corpus.id, level=level)
+
+    def _transition(self, level: str, topic: Optional[Topic], title: str) -> Optional[Pair]:
+        options = frame_sentences("transitions", level)
+        if not options:
+            return None
+        chosen = self.rng.choice(options)
+        name_ja = topic.name_ja if topic else "この話題"
+        name_zh = topic.name_zh if topic else "这个话题"
+        ja = (chosen.get("ja", "")
+              .replace("{topic}", name_ja)
+              .replace("{title}", title or name_ja))
+        zh = (chosen.get("zh", "")
+              .replace("{topic_zh}", name_zh)
+              .replace("{title}", title or name_zh))
+        return (ja, zh) if ja else None
+
+    def _frame(self, kind: str, level: str, topic: Optional[Topic]) -> Optional[Pair]:
         options = frame_sentences(kind, level)
         if not options:
             return None
@@ -104,6 +158,89 @@ class OfflineGenerator:
         zh = chosen.get("zh", "").replace("{topic_zh}", name_zh).replace("{topic}", name_ja)
         return (ja, zh) if ja else None
 
+    # -- collection --------------------------------------------------------
+    def _collect_blocks(
+        self,
+        corpus: TopicCorpus,
+        level: str,
+        budget: float,
+        warnings: List[str],
+    ) -> List[_Block]:
+        """Gather blocks until ``budget`` seconds of speech are covered."""
+        used: set = set()
+        blocks: List[_Block] = []
+        total = 0.0
+
+        def take(candidates: List[_Block], mark_transition: bool) -> None:
+            nonlocal total
+            for block in candidates:
+                if total >= budget:
+                    return
+                if block.title_ja:
+                    used.add(self._key(block.topic_id, Passage(
+                        block.level, block.title_ja, block.title_zh, [])))
+                    self._recent.append(f"{block.topic_id}:{block.level}:{block.title_ja}")
+                block.needs_transition = mark_transition and bool(blocks)
+                blocks.append(block)
+                total += block.seconds
+
+        # 1. Passages at the requested level, freshest first.
+        preferred = self._passage_blocks(corpus, level, used)
+        preferred.sort(key=lambda b: self._key(b.topic_id, Passage(
+            b.level, b.title_ja, b.title_zh, [])) in self._recent)
+        take(preferred, mark_transition=True)
+
+        # 2. Loose sentences at the requested level.
+        if total < budget:
+            extras = self._extras_block(corpus, level)
+            if extras:
+                take([extras], mark_transition=False)
+
+        # 3. Neighbouring levels of the same topic.
+        if total < budget:
+            stepped_out = False
+            for candidate_level in nearest_levels(level)[1:]:
+                if total >= budget:
+                    break
+                more = self._passage_blocks(corpus, candidate_level, used)
+                if more:
+                    stepped_out = True
+                    take(more, mark_transition=True)
+                if total < budget:
+                    extras = self._extras_block(corpus, candidate_level)
+                    if extras:
+                        stepped_out = True
+                        take([extras], mark_transition=False)
+            if stepped_out:
+                warnings.append(
+                    f"所选长度超出了「{level}」级别在这个主题下的语料量，"
+                    "已补充相邻级别的同主题内容。想要严格贴合级别，请选择更短的长度。"
+                )
+
+        # 4. A different topic, same level.
+        if total < budget:
+            others = [t for t in available_topic_ids() if t != corpus.id]
+            self.rng.shuffle(others)
+            added_topics: List[str] = []
+            for topic_id in others:
+                if total >= budget:
+                    break
+                other = load_topic(topic_id)
+                if not other:
+                    continue
+                more = self._passage_blocks(other, level, used)
+                if more:
+                    added_topics.append(topic_id)
+                    take(more[:1], mark_transition=True)
+            if added_topics:
+                names = "、".join(
+                    (TOPICS[t].name_zh if t in TOPICS else t) for t in added_topics[:3]
+                )
+                warnings.append(f"为了达到所选时长，课文后半段加入了其他主题：{names}。")
+
+        return blocks
+
+    # -- composition -------------------------------------------------------
     def generate(self, request: GenerationRequest) -> Lesson:
         if request.seed is not None:
             self.rng.seed(request.seed)
@@ -123,50 +260,35 @@ class OfflineGenerator:
                 warnings=warnings + ["语料文件缺失或损坏。"],
             )
 
-        total = target_sentence_count(request.length)
+        target = target_seconds(request.length)
         opener = self._frame("openers", level, topic)
         closer = self._frame("closers", level, topic)
-        frame_count = int(bool(opener)) + int(bool(closer))
-        body_target = max(2, total - frame_count)
+        frame_seconds = estimate_seconds(
+            [p[0] for p in (opener, closer) if p]
+        )
+        budget = max(10.0, target - frame_seconds)
 
-        passage = self._pick_passage(corpus, level)
-        body: List[Tuple[str, str]] = []
-        if passage:
-            body.extend((s.ja, s.zh) for s in passage.sentences)
+        blocks = self._collect_blocks(corpus, level, budget, warnings)
 
-        if len(body) < body_target:
-            extras = self._extra_pool(corpus, level, body_target - len(body))
-            joiners = connectives(level)
-            for extra in extras:
-                joiner = self.rng.choice(joiners) if joiners else ""
-                ja = extra.ja
-                if joiner and not ja.startswith(joiner):
-                    ja = joiner + ja
-                body.append((ja, extra.zh))
+        body: List[Pair] = []
+        for block in blocks:
+            if block.needs_transition:
+                block_topic = TOPICS.get(block.topic_id, topic)
+                transition = self._transition(level, block_topic, block.title_ja)
+                if transition:
+                    body.append(transition)
+            body.extend(block.pairs)
 
-        # Still short (very long lessons): borrow another passage of a nearby level.
-        while len(body) < body_target:
-            extra_passage = self._pick_passage(corpus, level)
-            if not extra_passage:
-                break
-            added = [(s.ja, s.zh) for s in extra_passage.sentences]
-            if not added:
-                break
-            body.extend(added)
-            if len(self._recent) >= _RECENT_LIMIT:
-                break
-
-        body = body[:body_target]
-
-        pairs: List[Tuple[str, str]] = []
+        pairs: List[Pair] = []
         if opener:
             pairs.append(opener)
-        pairs.extend(body)
+        pairs.extend(_trim_to_budget(body, budget))
         if closer:
             pairs.append(closer)
 
-        title_ja = passage.title_ja if passage else (topic.name_ja if topic else "")
-        title_zh = passage.title_zh if passage else (topic.name_zh if topic else "")
+        first = blocks[0] if blocks else None
+        title_ja = (first.title_ja if first else "") or (topic.name_ja if topic else "")
+        title_zh = (first.title_zh if first else "") or (topic.name_zh if topic else "")
 
         return build_lesson(
             pairs,
@@ -179,6 +301,31 @@ class OfflineGenerator:
             vocab=corpus.vocab_for(level) or corpus.vocab_for(nearest_levels(level)[0]),
             warnings=warnings,
         )
+
+
+_MIN_BODY_SENTENCES = 3
+
+
+def _trim_to_budget(body: List[Pair], budget: float) -> List[Pair]:
+    """Take sentences until ``budget`` seconds are covered, without overshooting.
+
+    Stops as soon as the budget is met, and refuses a sentence that would push
+    the total well past it - the long presets otherwise overshoot by a whole
+    sentence, which at N1 is ten seconds of audio.
+    """
+    if not body:
+        return body
+
+    limit = budget * 1.15
+    kept: List[Pair] = []
+    for pair in body:
+        seconds = estimate_seconds([p[0] for p in kept] + [pair[0]])
+        if seconds > limit and len(kept) >= _MIN_BODY_SENTENCES:
+            break
+        kept.append(pair)
+        if seconds >= budget:
+            break
+    return kept or body[:1]
 
 
 _DEFAULT = OfflineGenerator()

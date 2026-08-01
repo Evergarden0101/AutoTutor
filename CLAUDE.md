@@ -18,7 +18,8 @@ Target user reads Simplified Chinese and is learning Japanese.
 ```bash
 python -m autotutor                       # GUI
 python -m autotutor --cli --level N5 --topic daily_life --length short
-python -m pytest -q tests                 # 226 tests, ~10s
+python -m autotutor --cli --level N3 --topic technology --length xlong   # ~8 min
+python -m pytest -q tests                 # 258 tests, ~13s
 python -m pyflakes autotutor tests        # lint
 python build_exe.py --clean               # build the executable
 python assets/make_icon.py                # regenerate the icon
@@ -47,13 +48,21 @@ autotutor/
   content/        corpus, offline, online, llm, service, builder
   tts/            audio (clips/mp3/playback), openjtalk, sapi, edge
   ui/             main_window, widgets, settings_dialog, theme
-  data/corpus/    15 topics × N5–N1 + _common.json
+  data/corpus/    15 topics × N5–N1 (750 sentences) + _common.json
 launcher.py       frozen entry point (see gotcha #1)
 ```
 
 Data flows: `GenerationRequest` → `content.service.generate_lesson()` → a
 back-end → `content.builder.build_lesson()` (adds ruby + kana) → `Lesson` →
 `tts.Narrator.narrate()` → clip + timings → `export.export_bundle()`.
+
+**Length is a duration, not a sentence count.** `models.LENGTH_PRESETS` maps
+short/medium/long/xlong onto ~60/130/240/450 seconds of narration, and
+`models.estimate_seconds()` converts text to seconds using constants measured
+against the bundled voice (6.9 kana/s, 1.28 kana per written character). The
+offline composer keeps pulling blocks until the budget is met, widening from
+"more passages on this topic" to "neighbouring levels" to "another topic", and
+records each widening in `lesson.warnings`.
 
 ## Gotchas that will bite you
 
@@ -90,11 +99,26 @@ These each cost real debugging time. Please keep the guarding tests.
    from a least-squares fit over the labelled corpus. If you materially change
    the corpus, refit them and update the numbers quoted in the README and
    docstring. `test_score_is_monotonic_across_corpus_levels` will fail loudly
-   if the model stops separating levels.
+   if the model stops separating levels. (This has already happened once: the
+   corpus rewrite to longer passages moved every feature, and the weights were
+   refit from scratch. Drop any feature whose fitted coefficient comes out
+   negative — that is collinearity, not signal.)
 
 8. **Every online path must fall back to the offline corpus** and explain why
    in `lesson.warnings`. See `content/service.py`. Never let a network failure
    leave the user with nothing.
+
+9. **A ttk element name can only be created once per interpreter.** The check
+   mark that replaces clam's ✕ is an image element; switching theme has to
+   register a *new* element name (`theme._CHECK_SERIAL`) rather than redefining
+   the old one. Keep a Python reference to every `PhotoImage` too, or Tk
+   garbage-collects it and the indicator silently disappears.
+
+10. **The playback cursor glyph is always in the text, only its colour
+    changes.** `LessonView` tracks per-sentence index ranges; inserting or
+    deleting a ▶ during playback would invalidate them, so the glyph is written
+    once in the widget background colour and re-tagged in the accent colour
+    when that sentence is being read.
 
 ## Conventions
 
@@ -130,7 +154,16 @@ Invariants enforced by `tests/test_corpus_and_levels.py`:
 - every topic covers all five levels in `passages`, `extras` and `vocab`;
 - every `ja` ends with 。！？ and has a non-empty `zh`;
 - no stray Latin words in the Japanese (a common drafting slip);
-- passages have both titles and at least 4 sentences.
+- passages have both titles and at least 6 sentences;
+- passage sentences average enough characters per level that the result reads
+  as a paragraph rather than a list of one-line facts
+  (`test_passages_read_as_paragraphs`).
+
+Passages are written as developed paragraphs with an arc - situation,
+development, complication, reflection - because the composer now plays whole
+passages rather than padding with unrelated sentences. Longer sentences at low
+levels come from coordination (て-form chains, から/ので), not from grammar
+above the level.
 
 Do **not** store kana readings in the corpus — they are generated at runtime so
 the printed furigana always matches the audio. Fix bad readings by adding to

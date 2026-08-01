@@ -70,12 +70,26 @@ class TestCorpusIntegrity:
     def test_stats(self):
         stats = corpus_stats()
         assert len(stats) == len(TOPIC_IDS)
-        assert sum(stats.values()) > 400
+        assert sum(stats.values()) >= 700
+
+    @pytest.mark.parametrize("topic_id", TOPIC_IDS)
+    def test_passages_read_as_paragraphs(self, topic_id):
+        """Sentences should be developed, not one-line facts."""
+        for passage in load_topic(topic_id).passages:
+            lengths = [len(s.ja) for s in passage.sentences]
+            average = sum(lengths) / len(lengths)
+            # Floors sit below the observed minimum per level but well above the
+            # short, choppy sentences this corpus replaced (N5 18 -> 27 chars).
+            floor = {"N5": 22, "N4": 27, "N3": 32, "N2": 34, "N1": 35}[passage.level]
+            assert average >= floor, (
+                f"{topic_id}/{passage.level}: mean {average:.0f} chars, want >= {floor}"
+            )
+            assert len(passage.sentences) >= 6
 
 
 class TestCommonFrames:
     @pytest.mark.parametrize("level", LEVEL_CODES)
-    @pytest.mark.parametrize("kind", ["openers", "closers"])
+    @pytest.mark.parametrize("kind", ["openers", "closers", "transitions"])
     def test_frames_exist_for_every_level(self, kind, level):
         items = frame_sentences(kind, level)
         assert items

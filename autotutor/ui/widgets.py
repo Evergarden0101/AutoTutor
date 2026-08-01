@@ -15,6 +15,9 @@ MODE_PAREN = "paren"
 MODE_PLAIN = "plain"
 MODE_KANA = "kana"
 
+# Gutter glyph that marks the sentence being read aloud.
+PLAY_CURSOR = "\u25b6 "
+
 MODE_LABELS = (
     (MODE_RUBY, "振り仮名"),
     (MODE_PAREN, "漢字(かな)"),
@@ -94,6 +97,7 @@ class LessonView(ScrollingText):
         self.mode = MODE_RUBY
         self.show_translation = True
         self._sentence_ranges: Dict[int, tuple] = {}
+        self._cursor_ranges: Dict[int, tuple] = {}
         self._highlighted: Optional[int] = None
         self._configure_tags()
 
@@ -124,6 +128,17 @@ class LessonView(ScrollingText):
             "num", font=fonts.small, foreground=palette.muted,
             spacing1=headroom,
         )
+        # The playback cursor. The glyph is always present so that highlighting
+        # only has to change its colour - editing the text would invalidate the
+        # per-sentence ranges we track for the highlight.
+        self.text.tag_configure(
+            "cursor_off", font=fonts.small, foreground=palette.surface,
+            spacing1=headroom,
+        )
+        self.text.tag_configure(
+            "cursor_on", font=fonts.ui_bold, foreground=palette.accent,
+            spacing1=headroom,
+        )
         self.text.tag_configure(
             "title", font=fonts.heading, foreground=palette.text, spacing3=4,
         )
@@ -146,6 +161,7 @@ class LessonView(ScrollingText):
         )
         self.text.tag_raise("highlight")
         self.text.tag_raise("ruby")
+        self.text.tag_raise("cursor_on")
 
     def refresh_style(self, palette: Palette, fonts: Fonts) -> None:
         self.palette, self.fonts = palette, fonts
@@ -159,11 +175,13 @@ class LessonView(ScrollingText):
     def show_placeholder(self, message: str) -> None:
         self.clear()
         self._sentence_ranges.clear()
+        self._cursor_ranges.clear()
         self.write(message, "meta")
 
     def show_lesson(self, lesson: Optional[Lesson]) -> None:
         self.clear()
         self._sentence_ranges.clear()
+        self._cursor_ranges.clear()
         self._highlighted = None
         if lesson is None:
             return
@@ -183,6 +201,9 @@ class LessonView(ScrollingText):
 
         for index, sentence in enumerate(lesson.sentences):
             start = self.text.index("end-1c")
+            cursor_start = start
+            self.write(PLAY_CURSOR, "cursor_off")
+            self._cursor_ranges[index] = (cursor_start, self.text.index("end-1c"))
             self.write(f"{index + 1:>2}. ", "num")
             self._write_sentence(sentence)
             self.write("\n")
@@ -229,16 +250,28 @@ class LessonView(ScrollingText):
 
     # -- playback highlight ------------------------------------------------
     def highlight(self, index: Optional[int]) -> None:
+        """Mark the sentence currently being read aloud."""
         if index == self._highlighted:
             return
+
+        previous = self._cursor_ranges.get(self._highlighted) if self._highlighted is not None else None
+        if previous:
+            self.text.tag_remove("cursor_on", previous[0], previous[1])
+            self.text.tag_add("cursor_off", previous[0], previous[1])
         self.text.tag_remove("highlight", "1.0", "end")
+
         self._highlighted = index
         if index is None:
             return
+
         span = self._sentence_ranges.get(index)
         if not span:
             return
         self.text.tag_add("highlight", span[0], span[1])
+        cursor = self._cursor_ranges.get(index)
+        if cursor:
+            self.text.tag_remove("cursor_off", cursor[0], cursor[1])
+            self.text.tag_add("cursor_on", cursor[0], cursor[1])
         self.text.see(span[0])
 
 

@@ -16,7 +16,7 @@ from .console import configure_stdio
 from .content import generate_lesson
 from .export import export_bundle, lesson_to_text
 from .levels import LEVEL_CODES
-from .models import GenerationRequest
+from .models import LENGTH_IDS, LENGTH_PRESETS, GenerationRequest
 from .topics import RANDOM_TOPIC, TOPIC_IDS
 from .version import APP_NAME, __version__
 
@@ -33,7 +33,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="JLPT level (default: last used, or N4)")
     parser.add_argument("--topic", default=None,
                         help=f"topic id ({', '.join(TOPIC_IDS)}), 'random', or free text")
-    parser.add_argument("--length", choices=["short", "medium", "long"], default=None)
+    parser.add_argument(
+        "--length", choices=LENGTH_IDS, default=None,
+        help="target narration length: " + ", ".join(
+            f"{p.id} (~{p.minutes_zh})" for p in LENGTH_PRESETS
+        ),
+    )
     parser.add_argument("--source", choices=["offline", "online", "llm"], default=None)
     parser.add_argument("--out", default=None, help="output directory")
     parser.add_argument("--no-audio", action="store_true", help="skip speech synthesis")

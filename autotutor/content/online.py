@@ -19,13 +19,16 @@ from typing import List, Optional, Sequence, Tuple
 
 from ..config import Settings
 from ..levels import LEVELS, get_level, score_text, split_sentences
-from ..models import GenerationRequest, Lesson, target_sentence_count
+from ..models import GenerationRequest, Lesson, estimate_seconds, target_seconds
 from ..net import NetworkError, get_json, get_text
 from ..reading import normalise
 from ..topics import RANDOM_TOPIC, TOPICS, get_topic, search_terms_for
 from ..translate import Translator, to_japanese
 from .builder import build_lesson
 from .corpus import available_topic_ids
+
+# Warn once the text is more than a full JLPT level away from the request.
+_LEVEL_GAP_WARNING = 1.0
 
 WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
 NHK_LIST = "https://www3.nhk.or.jp/news/easy/news-list.json"
@@ -247,6 +250,20 @@ def best_window(sentences: Sequence[str], level: str, size: int) -> Tuple[List[s
     return window, abs(mean - target)
 
 
+def window_for_duration(
+    sentences: Sequence[str], level: str, seconds: float
+) -> Tuple[List[str], float]:
+    """Like :func:`best_window`, but sized to fill ``seconds`` of narration."""
+    if not sentences:
+        return [], 99.0
+    # Grow the window until the estimated narration reaches the target, or we
+    # run out of article.
+    size = 2
+    while size < len(sentences) and estimate_seconds(list(sentences[:size])) < seconds:
+        size += 1
+    return best_window(sentences, level, size)
+
+
 # --------------------------------------------------------------------------
 # Generator
 # --------------------------------------------------------------------------
@@ -308,24 +325,41 @@ class OnlineGenerator:
                 "没有搜到合适的日语文章。请检查网络连接，或换一个主题再试。"
             )
 
-        size = target_sentence_count(request.length)
-        best: Optional[Tuple[Article, List[str], float]] = None
+        target = float(target_seconds(request.length))
+        candidates: List[Tuple[Article, List[str], float]] = []
         for article in articles:
             sentences = clean_sentences(article.text)
             if len(sentences) < 3:
                 continue
-            window, distance = best_window(sentences, request.level, size)
-            if not window:
-                continue
-            if best is None or distance < best[2]:
-                best = (article, window, distance)
+            window, distance = window_for_duration(sentences, request.level, target)
+            if window:
+                candidates.append((article, window, distance))
 
-        if best is None:
+        if not candidates:
             raise OnlineError("搜到的文章无法拆成合适的句子，请换一个主题再试。")
 
-        article, window, distance = best
+        candidates.sort(key=lambda item: item[2])
+        article, window, distance = candidates[0]
+
+        # A single article is often too short for the longer presets; keep
+        # pulling in the next-closest articles until the target is reached.
+        extra_sources: List[Article] = []
+        for other, other_window, _ in candidates[1:]:
+            if estimate_seconds(window) >= target:
+                break
+            window = window + other_window
+            extra_sources.append(other)
+        if extra_sources:
+            titles = "、".join(a.title for a in extra_sources[:3])
+            warnings.append(f"为了达到所选时长，课文还合并了其他文章：{titles}。")
+
         estimated = sum(score_text(s) for s in window) / len(window)
-        if distance > 1.2:
+        if estimate_seconds(window) < target * 0.6:
+            warnings.append(
+                "搜到的文章比所选时长短，已按实际内容生成。"
+                "想要更长的音频，可以换用离线语料或 AI 生成模式。"
+            )
+        if distance > _LEVEL_GAP_WARNING:
             level_name = LEVELS[request.level].label_zh
             warnings.append(
                 f"这段网络文本的估计难度约为 {estimated:.1f} 级"
