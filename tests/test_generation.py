@@ -988,6 +988,57 @@ class TestOnlineGeneratorWithStubs:
         merged = [w for w in lesson.warnings if "接续" in w]
         assert merged and "同一来源" in merged[0], lesson.warnings
 
+    def test_similar_length_episodes_all_get_a_turn(self, stubbed, monkeypatch):
+        """A podcast feed is a pile of similar notes; one must not always win.
+
+        With a smooth coverage cost, whichever episode was a few sentences
+        longer won every single time - the user saw the same episode number
+        on every search.
+        """
+        from autotutor.content import sources as sources_module
+
+        base = ("今日はコンビニの話をするね。まじで最近よく行くんだよね。"
+                "夜中でも開いてるのがやばい。てか、店員さんも大変だと思う。")
+
+        def feed(query="", timeout=20, limit=4):
+            return [
+                Article(title=f"{700 + n}. 特別編", text=base + "あ" * (n * 4),
+                        url=f"u{n}", source_label="テスト番組",
+                        source_id="podcast", register=REGISTER_SPOKEN)
+                for n in range(6)
+            ]
+
+        patched = [
+            sources_module.Source(
+                s.id, s.label_zh, s.register,
+                feed if s.id == "podcast"
+                else (lambda *a, **k: (_ for _ in ()).throw(SourceError("x"))),
+                s.best_levels, s.note_zh,
+            )
+            for s in sources_module.SOURCES
+        ]
+        monkeypatch.setattr(sources_module, "SOURCES", patched)
+
+        settings = self._settings(sources="podcast")
+        titles = {
+            stubbed.OnlineGenerator(settings).generate(
+                self._request(register=REGISTER_SPOKEN)
+            ).title_ja
+            for _ in range(25)
+        }
+        assert len(titles) >= 3, titles
+
+    def test_coverage_cost_is_banded_not_smooth(self):
+        from autotutor.content.online import _coverage_cost
+
+        # Two notes a few sentences apart must land on the same cost.
+        short = ["短い文です。"] * 3
+        slightly_longer = ["短い文です。"] * 4
+        assert _coverage_cost(short, 240.0) == _coverage_cost(slightly_longer, 240.0)
+        # But something that can carry the lesson is still clearly better.
+        whole = ["日本語の勉強を毎日続けるのは思ったより大変だと思います。"] * 60
+        assert _coverage_cost(whole, 240.0) < _coverage_cost(short, 240.0)
+
     def test_repeated_searches_do_not_return_the_same_article(
         self, stubbed, monkeypatch
     ):

@@ -40,7 +40,7 @@ adds extra sources.
 | **Casual or formal** | 语体风格 picks between conversational Japanese — 常体 with ね・よ・んだ, まじで, てか, ぶっちゃけ, the way people under thirty actually talk to each other — and the written style of news and essays. Every topic has conversational passages at N5–N3, and a casual lesson keeps one voice throughout rather than switching to です・ます halfway. |
 | **Pick the length you want** | Four targets — about **1, 2, 4 or 8 minutes** of narration. The composer keeps adding material, with spoken transitions, until it reaches the target. |
 | **Clear narration → MP3** | Offline Open JTalk voice, Windows system voices, or Microsoft Edge neural voices. The voice picker sits right above the lesson; speed, pauses and repeats are in the settings. |
-| **Follow along while it reads** | The sentence being spoken is marked with a ▶ in the gutter and highlighted, and the status bar shows `第 3 / 17 句　00:16 / 02:17` with a progress bar. |
+| **Follow along while it reads** | The sentence being spoken gets a coloured band and an accent bar in the gutter, and the status bar shows `第 3 / 17 句　00:16 / 02:17` with a progress bar. Works on every voice, online included. |
 | **Start from any sentence** | Click the ▶ next to a sentence to begin reading there — no re-synthesis, no scrubbing. Useful for drilling the one line you keep mishearing. |
 | **Truly offline** | The voice model and dictionary are bundled *inside* the executable. No account, no API key, no download on first run. |
 | **Six online sources** | Podcast episode notes, YouTube captions, NHK News Web Easy, NHK news feeds, Wikinews and Wikipedia — pick which ones to use in **设置 → 搜索来源**. |

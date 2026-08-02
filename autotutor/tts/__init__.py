@@ -175,8 +175,13 @@ class NarrationResult:
 
     @property
     def has_timings(self) -> bool:
-        """MP3 clips from the online engine cannot be measured without decoding."""
-        return bool(self.timings) and isinstance(self.clip, PcmClip)
+        """Whether the playback cursor can follow along.
+
+        True for the online engine too, now that MP3 length is read from the
+        frame headers: this returning False was why switching to an Edge voice
+        silently turned the reading indicator off.
+        """
+        return bool(self.timings) and self.duration > 0
 
     @property
     def can_seek(self) -> bool:

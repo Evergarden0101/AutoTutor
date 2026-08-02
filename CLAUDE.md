@@ -19,7 +19,7 @@ Target user reads Simplified Chinese and is learning Japanese.
 python -m autotutor                       # GUI
 python -m autotutor --cli --level N5 --topic daily_life --length short
 python -m autotutor --cli --level N3 --topic technology --length xlong   # ~8 min
-python -m pytest -q tests                 # 478 tests, ~20s
+python -m pytest -q tests                 # 498 tests, ~29s
 python -m pyflakes autotutor tests        # lint
 python build_exe.py --clean               # build the executable
 python assets/make_icon.py                # regenerate the icon
@@ -219,13 +219,33 @@ These each cost real debugging time. Please keep the guarding tests.
     neutral ~0.50, written 0.07-0.43 - and
     `test_the_corpus_registers_land_in_their_own_bands` fails if they start to.
 
-19. **Seeking is by byte offset, not by seconds.** `SentenceTiming.start` is
-    only meaningful for PCM - an MP3 stream cannot be measured without decoding
-    it - but `concat()` joins clips byte for byte, so `offset_bytes` is exact
-    for both containers. That is what lets "play from this sentence" work on
-    the online engine too. `play(from_index)` then rewinds `_play_started` by
-    `starts_at(index)` so the cursor tracking needs no other change. Guarded by
-    `TestSeeking`.
+19. **Seeking is by byte offset, not by seconds.** `concat()` joins clips byte
+    for byte, so `offset_bytes` is exact for both containers, which is what
+    lets "play from this sentence" work on the online engine too.
+    `play(from_index)` then rewinds `_play_started` by `starts_at(index)` so
+    the cursor tracking needs no other change. Guarded by `TestSeeking`.
+
+20. **`Mp3Clip.duration` reads the frame headers.** It used to return 0.0 with
+    a comment about needing a decoder, which quietly disabled the whole
+    playback cursor on the online engine: no duration meant `has_timings` was
+    False meant the highlight never moved, with nothing said about it. Walking
+    the headers needs no decoder and is exact for VBR too. Memoise it - the
+    cursor asks eight times a second - and keep `_duration` `init=False` so
+    `dataclasses.replace` recomputes for the new bytes. Guarded by
+    `TestMp3Duration` and `test_the_cursor_follows_an_mp3_narration_too`.
+
+21. **Never split a sentence through a quote.** Japanese punctuates *inside*
+    「」, so splitting on 。 alone turns 「行かへん？」と誘われた into a fragment
+    plus an orphan starting with 」 — which is what the online sources were
+    serving. `levels.split_sentences` tracks bracket depth. Guarded by
+    `TestSentenceSplitting`.
+
+22. **A smooth ranking cost picks the same winner forever.** Podcast feeds are
+    piles of similar-length episode notes; with a continuous `_coverage_cost`
+    whichever was a few sentences longer won every search, so users saw one
+    episode number again and again. The cost is banded so near-equal sources
+    tie and `_TIE_BAND` sampling decides. Guarded by
+    `test_similar_length_episodes_all_get_a_turn`.
 
 ## Conventions
 

@@ -111,6 +111,53 @@ class TestCorpusIntegrity:
             assert len(passage.sentences) >= (5 if casual else 6)
 
 
+class TestSentenceSplitting:
+    """Japanese punctuates inside 「」, so a naive split breaks quotes apart."""
+
+    def test_a_quote_is_never_split_through(self):
+        text = "先輩に「今週の金曜、王将行かへん？」と誘われたんです。そんなの最高やん。"
+        assert split_sentences(text) == [
+            "先輩に「今週の金曜、王将行かへん？」と誘われたんです。",
+            "そんなの最高やん。",
+        ]
+
+    def test_no_sentence_starts_with_a_stray_closing_quote(self):
+        text = "彼は「わかった。行くよ。」と言った。それから準備を始めた。"
+        assert not any(s.startswith(("」", "』", "）")) for s in split_sentences(text))
+
+    def test_nested_quotes(self):
+        text = "入れ子の「引用「内側」もある」場合。次の文。"
+        assert split_sentences(text) == ["入れ子の「引用「内側」もある」場合。", "次の文。"]
+
+    def test_parentheses_are_not_split_through(self):
+        assert split_sentences("括弧（これは注釈です。）のあと。次へ。") == [
+            "括弧（これは注釈です。）のあと。", "次へ。",
+        ]
+
+    def test_an_unclosed_quote_does_not_swallow_everything(self):
+        text = "閉じ忘れた「引用のまま終わる。"
+        assert split_sentences(text) == [text]
+
+    def test_ordinary_text_is_unaffected(self):
+        assert split_sentences("普通の文です。もう一つの文です。") == [
+            "普通の文です。", "もう一つの文です。",
+        ]
+
+    def test_trailing_punctuation_stays_with_its_sentence(self):
+        assert split_sentences("本当？！すごい。") == ["本当？！", "すごい。"]
+
+    def test_empty_and_blank(self):
+        assert split_sentences("") == []
+        assert split_sentences("   ") == []
+
+    def test_text_with_no_terminator(self):
+        assert split_sentences("終わりの句点がない") == ["終わりの句点がない"]
+
+    def test_the_split_is_lossless(self):
+        text = "彼は「行く。」と言った。次の文です。最後。"
+        assert "".join(split_sentences(text)) == text
+
+
 class TestRegister:
     @pytest.mark.parametrize(
         "text,expected",
@@ -245,7 +292,7 @@ class TestLevels:
         assert analyse("これは本である。").polite_ratio == 0.0
 
 
-class TestSentenceSplitting:
+class TestSentenceSplittingBasics:
     def test_splits_on_japanese_punctuation(self):
         assert split_sentences("あ。い！う？") == ["あ。", "い！", "う？"]
 

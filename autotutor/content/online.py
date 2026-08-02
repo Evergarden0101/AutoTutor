@@ -152,11 +152,21 @@ _COVERAGE_COST = 0.8
 
 
 def _coverage_cost(window: Sequence[str], target: float) -> float:
-    """How far this source falls short of carrying the lesson on its own."""
+    """How far this source falls short of carrying the lesson on its own.
+
+    Banded rather than continuous. A podcast feed is a pile of similar-length
+    episode notes, and a smooth cost makes whichever is a few sentences longer
+    win every single time - the same episode, forever. Within a band they tie,
+    and the tie-break picks at random.
+    """
     if target <= 0:
         return 0.0
     covered = min(1.0, estimate_seconds(list(window)) / target)
-    return (1.0 - covered) * _COVERAGE_COST
+    if covered >= 0.85:      # can carry the lesson by itself
+        return 0.0
+    if covered >= 0.45:      # most of it
+        return _COVERAGE_COST * 0.5
+    return _COVERAGE_COST
 
 
 # --------------------------------------------------------------------------
@@ -352,10 +362,13 @@ class OnlineGenerator:
                 f"（1=N5，5=N1），与所选的 {request.level}（{level_name}）差距较大。"
                 "如需完全贴合级别，请使用离线语料模式。"
             )
-        if estimate_seconds(window) < target * 0.6:
+        actual = estimate_seconds(window)
+        if actual < target * 0.6:
+            minutes, seconds = divmod(int(actual), 60)
             warnings.append(
-                "取到的内容比所选时长短，已按实际长度生成。"
-                "想要更长的音频，可以换用离线语料或 AI 生成模式。"
+                f"网上找到的这段内容只有约 {minutes} 分 {seconds:02d} 秒，短于所选时长，"
+                "已按实际长度生成。播客和新闻的单篇内容本来就不长——"
+                "把「音频长度」调短一档最合适，需要长音频请用离线语料。"
             )
         if request.register in (REGISTER_SPOKEN, REGISTER_WRITTEN):
             # Both signals matter: the source that was actually used, and how

@@ -35,6 +35,7 @@ from autotutor.tts.audio import (
     concat,
     encode_mp3,
     mp3_available,
+    mp3_duration,
     silence_like,
     write_clip,
 )
@@ -117,6 +118,47 @@ class TestMp3:
     def test_unknown_extension(self, tmp_path):
         with pytest.raises(UnsupportedFormat):
             write_clip(PcmClip(b"\x00\x00", 16000), tmp_path / "a.ogg")
+
+
+class TestMp3Duration:
+    """Reading length from the frame headers - no decoder, no dependency."""
+
+    def test_empty_and_garbage(self):
+        assert mp3_duration(b"") == 0.0
+        assert mp3_duration(b"this is not an mp3 stream at all") == 0.0
+
+    @pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+    @pytest.mark.parametrize("seconds,rate", [(1.0, 24000), (2.5, 24000), (2.0, 44100)])
+    def test_matches_the_encoded_length(self, seconds, rate):
+        data = encode_mp3(b"\x00\x00" * int(rate * seconds), rate, 128)
+        # Encoder padding frames are real audio, so allow a frame or two.
+        assert mp3_duration(data) == pytest.approx(seconds, abs=0.1)
+
+    @pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+    def test_concatenated_streams_add_up(self):
+        one = encode_mp3(b"\x00\x00" * 24000, 24000, 128)
+        two = encode_mp3(b"\x00\x00" * 48000, 24000, 128)
+        assert mp3_duration(one + two) == pytest.approx(
+            mp3_duration(one) + mp3_duration(two), abs=0.01
+        )
+
+    @pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+    def test_an_id3_tag_is_skipped(self):
+        audio = encode_mp3(b"\x00\x00" * 24000, 24000, 128)
+        # A 100-byte ID3v2 tag: "ID3", version, flags, syncsafe size.
+        tag = b"ID3\x03\x00\x00" + bytes([0, 0, 0, 90]) + b"\x00" * 90
+        assert mp3_duration(tag + audio) == pytest.approx(mp3_duration(audio), abs=0.01)
+
+    @pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+    def test_the_clip_memoises_but_replace_recomputes(self):
+        from dataclasses import replace
+
+        one = encode_mp3(b"\x00\x00" * 24000, 24000, 128)
+        two = encode_mp3(b"\x00\x00" * 48000, 24000, 128)
+        whole = Mp3Clip(one + two, 24000)
+        assert whole.duration == whole.duration          # second call is cached
+        tail = replace(whole, data=two)
+        assert tail.duration < whole.duration
 
 
 class TestEngines:
@@ -341,15 +383,34 @@ class TestSeeking:
         assert NarrationResult(None).clip_from(2) is None
         assert NarrationResult(None).can_seek is False
 
-    def test_mp3_can_seek_even_without_timings_in_seconds(self):
+    def test_mp3_seeks_by_byte_offset(self):
         """concat() joins MP3 byte for byte, so offsets are exact there too."""
         first, second = b"\xff\xfb" + b"a" * 40, b"\xff\xfb" + b"b" * 40
         clip = Mp3Clip(first + second)
         timings = [SentenceTiming(0, 0.0, 0.0, 0), SentenceTiming(1, 0.0, 0.0, len(first))]
         result = NarrationResult(clip, "edge", "Edge", timings=timings)
-        assert result.has_timings is False   # seconds are unknown for MP3
         assert result.can_seek is True
         assert result.clip_from(1).data == second
+
+    @pytest.mark.skipif(not mp3_available(), reason="lameenc not installed")
+    def test_the_cursor_follows_an_mp3_narration_too(self):
+        """Regression: an Edge voice used to turn the reading indicator off.
+
+        has_timings was gated on the clip being PCM, because MP3 length was
+        hardcoded to 0.0. Nothing said so - the highlight just never moved.
+        """
+        pieces = [Mp3Clip(encode_mp3(b"\x00\x00" * 24000, 24000, 128), 24000)
+                  for _ in range(3)]
+        clip = concat(pieces)
+        offset, elapsed, timings = 0, 0.0, []
+        for index, piece in enumerate(pieces):
+            timings.append(SentenceTiming(index, elapsed, elapsed + piece.duration, offset))
+            offset += len(piece.data)
+            elapsed += piece.duration
+        result = NarrationResult(clip, "edge", "Edge", timings=timings)
+        assert result.has_timings is True
+        assert result.duration == pytest.approx(elapsed, abs=0.05)
+        assert result.starts_at(2) > result.starts_at(1) > 0
 
     @pytest.mark.skipif(
         not get_engine("openjtalk").available(), reason="pyopenjtalk not installed"

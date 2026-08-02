@@ -160,14 +160,23 @@ class LessonView(ScrollingText):
             "vocab", font=fonts.ui, foreground=palette.text, lmargin1=10, lmargin2=10,
         )
         self.text.tag_configure("sep", font=fonts.small, foreground=palette.border)
+        # The sentence being read. A tinted background alone reads as "maybe
+        # selected"; the coloured left edge is what makes it unmistakable at a
+        # glance while the audio is running.
         self.text.tag_configure(
-            "highlight", background=palette.select,
+            "highlight", background=palette.reading,
+            borderwidth=0, lmargin1=6, lmargin2=6,
+        )
+        self.text.tag_configure(
+            "highlight_edge", background=palette.reading_edge,
+            foreground=palette.reading_edge,
         )
         # The per-sentence start button. It reuses the cursor glyph and the
         # sentence number rather than inserting a widget: the highlight tracks
         # character ranges, and anything inserted later would shift them.
         self.text.tag_configure("start_hot", background=palette.select)
         self.text.tag_raise("highlight")
+        self.text.tag_raise("highlight_edge")
         self.text.tag_raise("ruby")
         self.text.tag_raise("cursor_on")
         self.text.tag_raise("start_hot")
@@ -322,6 +331,7 @@ class LessonView(ScrollingText):
             self.text.tag_remove("cursor_on", previous[0], previous[1])
             self.text.tag_add("cursor_off", previous[0], previous[1])
         self.text.tag_remove("highlight", "1.0", "end")
+        self.text.tag_remove("highlight_edge", "1.0", "end")
 
         self._highlighted = index
         if index is None:
@@ -335,6 +345,9 @@ class LessonView(ScrollingText):
         if cursor:
             self.text.tag_remove("cursor_off", cursor[0], cursor[1])
             self.text.tag_add("cursor_on", cursor[0], cursor[1])
+            # One character of solid accent at the start of the line: visible
+            # even when the page is scrolling past.
+            self.text.tag_add("highlight_edge", cursor[0], f"{cursor[0]}+1c")
         self.text.see(span[0])
 
 

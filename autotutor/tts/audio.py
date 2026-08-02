@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -29,6 +29,76 @@ class AudioError(RuntimeError):
 
 class UnsupportedFormat(AudioError):
     pass
+
+
+# --------------------------------------------------------------------------
+# MP3 frame headers
+# --------------------------------------------------------------------------
+
+# Layer III bitrates in kbps, indexed by the header's 4-bit bitrate field.
+_L3_BITRATES_V1 = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
+_L3_BITRATES_V2 = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)
+# Sample rates by version bits (3 = MPEG1, 2 = MPEG2, 0 = MPEG2.5).
+_MP3_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000),
+              0: (11025, 12000, 8000)}
+
+
+def _id3_size(data: bytes) -> int:
+    """Length of a leading ID3v2 tag, which carries no audio."""
+    if len(data) < 10 or data[:3] != b"ID3":
+        return 0
+    size = 0
+    for byte in data[6:10]:          # syncsafe: seven bits per byte
+        size = (size << 7) | (byte & 0x7F)
+    return size + 10
+
+
+def mp3_duration(data: bytes) -> float:
+    """Seconds of audio in an MP3 stream, by summing its frame headers."""
+    if not data:
+        return 0.0
+    position = _id3_size(data)
+    end = len(data)
+    seconds = 0.0
+    while position + 4 <= end:
+        header = data[position:position + 4]
+        if header[0] != 0xFF or (header[1] & 0xE0) != 0xE0:
+            position += 1            # resync: skip junk between frames
+            continue
+        version = (header[1] >> 3) & 0x03
+        layer = (header[1] >> 1) & 0x03
+        bitrate_index = (header[2] >> 4) & 0x0F
+        rate_index = (header[2] >> 2) & 0x03
+        padding = (header[2] >> 1) & 0x01
+        if version == 1 or layer == 0 or rate_index == 3:
+            position += 1            # reserved values: not a real header
+            continue
+        if bitrate_index in (0, 15):  # free-form or invalid
+            position += 1
+            continue
+
+        sample_rate = _MP3_RATES[version][rate_index]
+        table = _L3_BITRATES_V1 if version == 3 else _L3_BITRATES_V2
+        bitrate = table[bitrate_index] * 1000
+        if not bitrate:
+            position += 1
+            continue
+
+        if layer == 3:               # Layer I
+            samples = 384
+            size = (12 * bitrate // sample_rate + padding) * 4
+        else:                        # Layer II / III
+            samples = 1152 if version == 3 else 576
+            if layer == 2:           # Layer II is always 1152
+                samples = 1152
+            size = (samples // 8) * bitrate // sample_rate + padding
+        if size <= 4:
+            position += 1
+            continue
+
+        seconds += samples / sample_rate
+        position += size
+    return seconds
 
 
 # --------------------------------------------------------------------------
@@ -77,12 +147,24 @@ class Mp3Clip:
 
     data: bytes
     sample_rate: int = 24000
+    # Memoised: the playback cursor asks for the duration eight times a second,
+    # and an eight-minute lesson is tens of thousands of frames to walk.
+    # init=False so dataclasses.replace() recomputes it for the new data.
+    _duration: Optional[float] = field(default=None, init=False,
+                                       repr=False, compare=False)
 
     @property
     def duration(self) -> float:
-        # Frame-accurate duration would require parsing every frame header;
-        # the caller only uses this for a rough progress display.
-        return 0.0
+        """Exact length, from the frame headers alone.
+
+        Returning 0.0 here used to disable the whole playback cursor on the
+        online engine: no duration meant no timings meant no highlight. Walking
+        the headers is cheap - no decoder, no dependency - and works for VBR
+        too because every frame is measured rather than extrapolated.
+        """
+        if self._duration is None:
+            self._duration = mp3_duration(self.data)
+        return self._duration
 
     @property
     def is_empty(self) -> bool:

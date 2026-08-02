@@ -63,6 +63,9 @@ _KANJI_RE = re.compile(r"[一-鿿㐀-䶿]")
 _KANJI_RUN_RE = re.compile(r"[一-鿿㐀-䶿]+")
 _KANA_RE = re.compile(r"[぀-ゟ゠-ヿー]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?])\s*")
+_SENTENCE_END = "。！？!?"
+_QUOTE_OPEN = "「『（(“"
+_QUOTE_CLOSE = "」』）)”"
 # Sentence endings that mark learner-facing polite style.
 _POLITE_END_RE = re.compile(r"(ます|ました|ません|でしょう|です|でした|ください)[。！？!?]?$")
 # Sentence endings that mark casual speech. Plain form on its own does not mean
@@ -247,9 +250,37 @@ class TextStats:
 
 
 def split_sentences(text: str) -> List[str]:
-    """Split Japanese text into sentences on 。！？ (and ASCII equivalents)."""
-    parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(text or "")]
-    return [p for p in parts if p]
+    """Split Japanese text into sentences on 。！？ (and ASCII equivalents).
+
+    Quotes are never split through. Japanese punctuates *inside* 「」, so a
+    naive split turns 「行かへん？」と誘われた into a fragment and an orphan
+    starting with 」 - which is exactly what the online sources were serving.
+    """
+    text = text or ""
+    sentences: List[str] = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(text):
+        if char in _QUOTE_OPEN:
+            depth += 1
+            continue
+        if char in _QUOTE_CLOSE:
+            depth = max(0, depth - 1)
+            continue
+        if depth or char not in _SENTENCE_END:
+            continue
+        # Trailing quotes and closers belong to the sentence they end.
+        end = index + 1
+        while end < len(text) and text[end] in _QUOTE_CLOSE + "。！？!?":
+            end += 1
+        piece = text[start:end].strip()
+        if piece:
+            sentences.append(piece)
+        start = end
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 def analyse(text: str) -> TextStats:

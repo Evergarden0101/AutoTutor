@@ -41,6 +41,11 @@ class Palette:
     ruby: str
     warn: str
     select: str
+    # The sentence being read aloud. Deliberately stronger than `select`, which
+    # is the text-selection tint: sharing it made the reading indicator almost
+    # invisible against the white page.
+    reading: str
+    reading_edge: str
 
 
 LIGHT = Palette(
@@ -55,6 +60,8 @@ LIGHT = Palette(
     ruby="#8a6d3b",
     warn="#9a6b16",
     select="#f0e2d2",
+    reading="#ffe0b8",
+    reading_edge="#b4541f",
 )
 
 DARK = Palette(
@@ -69,6 +76,8 @@ DARK = Palette(
     ruby="#c9a46a",
     warn="#d8a350",
     select="#3a3129",
+    reading="#54402c",
+    reading_edge="#f09a5c",
 )
 
 
