@@ -37,7 +37,7 @@ adds extra sources.
 | **15 topic fields** | Daily life · Food · Travel · School · Work · Shopping · Hospital · Games · Anime & manga · Programming · Technology · Sports · Music · Weather · Japanese culture — plus *random* and *free-text* topics. |
 | **Furigana on every kanji** | Readings come from the same Open JTalk dictionary that produces the audio, so what you read is exactly what you hear. Four display modes: ruby, `漢字(かんじ)`, kanji only, kana only. |
 | **Chinese translation** | Every bundled sentence ships with hand-written Simplified Chinese. Web and custom text are translated online. |
-| **Casual or formal** | 语体风格 picks between conversational Japanese — 常体 with ね・よ・んだ, the way people actually talk — and the written style of news and essays. Every topic has conversational passages at N5–N3. |
+| **Casual or formal** | 语体风格 picks between conversational Japanese — 常体 with ね・よ・んだ, まじで, てか, ぶっちゃけ, the way people under thirty actually talk to each other — and the written style of news and essays. Every topic has conversational passages at N5–N3, and a casual lesson keeps one voice throughout rather than switching to です・ます halfway. |
 | **Pick the length you want** | Four targets — about **1, 2, 4 or 8 minutes** of narration. The composer keeps adding material, with spoken transitions, until it reaches the target. |
 | **Clear narration → MP3** | Offline Open JTalk voice, Windows system voices, or Microsoft Edge neural voices. The voice picker sits right above the lesson; speed, pauses and repeats are in the settings. |
 | **Follow along while it reads** | The sentence being spoken is marked with a ▶ in the gutter and highlighted, and the status bar shows `第 3 / 17 句　00:16 / 02:17` with a progress bar. |
@@ -127,15 +127,23 @@ is skipped rather than failing the whole search.
 | Source | Register | What it gives you |
 |---|---|---|
 | **NHK 简易新闻** | written | News rewritten for learners. The best match for N5–N3. |
-| **播客节目笔记** | spoken | Episode notes from Japanese podcast feeds — conversational, and about whatever people are actually talking about. |
+| **播客节目笔记** | spoken | Episode notes from seven Japanese podcast feeds — conversational, and about whatever people are actually talking about. |
+| **博客与热门文章** | spoken | Hatena's popular entries and personal blogs: the closest thing online to how Japanese people write to each other. |
 | **YouTube 字幕** | spoken | Paste a video link as a 自定义主题 and AutoTutor reads its Japanese captions, preferring human-written tracks over auto-generated ones. It never searches or crawls YouTube — only the video you point it at. |
-| **NHK 新闻** | written | National news headlines and summaries. |
+| **NHK 新闻** | written | National news across seven category feeds — society, economy, sport, culture, science, international. |
+| **科技与数码** | written | ITmedia and GIGAZINE. Modern vocabulary, and a much better N2 match than an encyclopedia. |
 | **维基新闻** | written | Current-affairs reporting, a little less formal than Wikipedia. |
 | **维基百科** | written | Any topic at all, in the most formal register. |
 
 Choosing 口语·日常 puts the spoken sources first and prefers passages that read as speech;
 choosing 书面·正式 does the opposite. If the best available match is in the wrong register,
 you get it anyway, with a note saying so — a rough register match beats nothing.
+
+**You will not get the same lesson twice.** Everything that picks — which feed leads, which
+entry, which search hit, which source goes first among equally suitable ones, and which of
+several near-equal candidates wins — is sampled rather than taken from the top. A fully
+deterministic pipeline returns one lesson per topic and never changes its mind, which is
+the single loudest complaint online search attracts.
 
 **Every online mode degrades gracefully.** If the search fails, the API key is missing, or
 the network is down, AutoTutor falls back to the offline corpus and tells you why in the
@@ -233,8 +241,8 @@ analysers get wrong in isolation (`日本語` → にほんご, `二人` → ふ
 **Difficulty.** `score_text()` is a three-feature linear model — kanji sophistication,
 sentence length, and how much of the text is plain *written* style, meaning neither
 です/ます nor colloquial. The weights were fitted by least squares against the
-level-labelled corpus sentences; it explains 73 % of the variance there and lands within
-one JLPT level 86 % of the time. It drives the online window picker and the "this text is
+level-labelled corpus sentences; it explains 75 % of the variance there and lands within
+one JLPT level 87 % of the time. It drives the online window picker and the "this text is
 harder than your level" warning.
 
 That third feature used to be simply "not です/ます", which worked only because the corpus
@@ -246,6 +254,15 @@ not the same thing as 書き言葉, and 過ごしてるよ was being scored as h
 conversational, polite or written, so the difficulty model and the 语体 selector can never
 disagree about what "casual" means. Corpus passages carry an explicit tag, and a test
 fails if a tag stops matching what the text actually reads like.
+
+Register needs positive evidence on *both* sides. Judging "written" as merely "plain and
+not colloquial" works as a difficulty feature — long unmarked plain sentences really are
+harder — but not as a register test, because real speech is full of unmarked plain
+sentences. 完全にやめるのは無理だけど、減らすくらいならできそう is conversational; treating
+it as an essay is what made the corpus score as formal once it started sounding natural.
+So the register score looks for literary constructions (である, における, とされる) rather
+than for the absence of です・ます. Measured over the bundled corpus the three bands do not
+overlap: conversational 0.57–1.00, polite ~0.50, written 0.07–0.43.
 
 **Length.** Narration speed was measured against the bundled voice at 6.9 kana/second, so
 a target duration converts directly into an amount of text.

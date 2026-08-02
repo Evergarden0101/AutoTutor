@@ -14,10 +14,18 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
+# A descriptive User-Agent is the polite default, but several Japanese news
+# sites sit behind a CDN that answers anything non-browser with 401/403 - NHK
+# News Web Easy's article list is one of them. These are public, unauthenticated
+# endpoints serving the same JSON to any browser, so we identify as one.
 USER_AGENT = (
-    "AutoTutor/1.0 (Japanese listening practice generator; "
-    "+https://github.com/Evergarden0101/AutoTutor)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+DEFAULT_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en;q=0.8",
+}
 
 DEFAULT_TIMEOUT = 20
 
@@ -30,6 +38,8 @@ def _open(url: str, timeout: int, headers: Optional[Dict[str, str]] = None) -> b
     request = urllib.request.Request(url)
     request.add_header("User-Agent", USER_AGENT)
     request.add_header("Accept-Encoding", "gzip")
+    for key, value in DEFAULT_HEADERS.items():
+        request.add_header(key, value)
     for key, value in (headers or {}).items():
         request.add_header(key, value)
     try:

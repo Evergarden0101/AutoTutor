@@ -11,7 +11,7 @@ The score is a small linear model over three surface features (kanji
 sophistication, sentence length, and how much of the text is plain *written*
 style - neither です/ます nor colloquial).  Its weights were fitted by least
 squares against the level-labelled sentences in the bundled corpus; on that
-data it explains 73% of the variance and lands within one JLPT level 85% of
+data it explains 75% of the variance and lands within one JLPT level 87% of
 the time.
 
 Note the shape of the written-style feature.  An earlier version used simply
@@ -81,6 +81,16 @@ _CASUAL_END_RE = re.compile(
 # Contractions and fillers that only occur in speech, wherever they appear.
 _CASUAL_INLINE_RE = re.compile(
     r"ちゃう|ちゃっ|じゃっ|なきゃ|なくちゃ|なんか|やっぱ|だってさ|ってさ|みたいな感じ"
+    r"|まじで|めっちゃ|ぶっちゃけ|てか|すごく|ちょっと|けっこう"
+)
+# Constructions that only occur in writing. Unlike the written-style *feature*,
+# which is "plain and not colloquial", this needs positive evidence: ordinary
+# speech is full of unmarked plain sentences, and counting those as literary is
+# what made a conversational passage score as formal.
+_LITERARY_RE = re.compile(
+    r"である|であった|ではない|であろう|であり|とされ|とみられ|における|によって"
+    r"|に他ならない|にほかならない|べきである|ざるを得な|を余儀なくされ|つつある"
+    r"|のである|なのである|といえよう|と言えよう|に過ぎな|にすぎな|とはいえ"
 )
 
 # Least-squares weights fitted against the bundled level-labelled corpus.
@@ -88,10 +98,10 @@ _CASUAL_INLINE_RE = re.compile(
 # was redefined. compound_ratio was dropped in this refit: its coefficient is
 # positive but including it inverts the N2/N1 ordering, and the two levels are
 # barely separable by surface statistics anyway.
-_W_KANJI_BAND = 0.550
-_W_SENTENCE_LEN = 0.803
-_W_WRITTEN_STYLE = 1.141
-_W_INTERCEPT = -1.551
+_W_KANJI_BAND = 0.539
+_W_SENTENCE_LEN = 0.884
+_W_WRITTEN_STYLE = 1.170
+_W_INTERCEPT = -1.856
 
 
 @dataclass(frozen=True)
@@ -232,6 +242,7 @@ class TextStats:
     polite_ratio: float = 1.0
     casual_ratio: float = 0.0
     written_ratio: float = 0.0
+    literary_ratio: float = 0.0
     unique_kanji: List[str] = field(default_factory=list)
 
 
@@ -277,10 +288,14 @@ def analyse(text: str) -> TextStats:
     casual = sum(1 for s in counted
                  if not _POLITE_END_RE.search(s)
                  and (_CASUAL_END_RE.search(s) or _CASUAL_INLINE_RE.search(s)))
+    literary = sum(1 for s in counted if _LITERARY_RE.search(s))
     stats.polite_ratio = polite / len(counted)
     stats.casual_ratio = casual / len(counted)
+    stats.literary_ratio = literary / len(counted)
     # What is left is plain form that is neither polite nor colloquial: the
-    # 常体 of newspapers, essays and encyclopedias.
+    # 常体 of newspapers, essays and encyclopedias. Good enough as a difficulty
+    # feature - long unmarked plain sentences really are harder - but too
+    # trigger-happy to judge register with; see literary_ratio for that.
     stats.written_ratio = max(0.0, 1.0 - stats.polite_ratio - stats.casual_ratio)
     return stats
 

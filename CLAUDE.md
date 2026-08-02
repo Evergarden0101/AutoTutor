@@ -19,7 +19,7 @@ Target user reads Simplified Chinese and is learning Japanese.
 python -m autotutor                       # GUI
 python -m autotutor --cli --level N5 --topic daily_life --length short
 python -m autotutor --cli --level N3 --topic technology --length xlong   # ~8 min
-python -m pytest -q tests                 # 449 tests, ~21s
+python -m pytest -q tests                 # 478 tests, ~20s
 python -m pyflakes autotutor tests        # lint
 python build_exe.py --clean               # build the executable
 python assets/make_icon.py                # regenerate the icon
@@ -74,10 +74,13 @@ seconds costs a warning and buys material that `_trim_to_budget` throws away.
 **Register (语体) is a preference, not a filter.** `GenerationRequest.register`
 is auto/spoken/written. Conversational passages exist at N5–N3 only, so a
 spoken request above that falls back to the neutral です・ます passages and
-warns. `corpus.passages_for(level, register)` returns `wanted + neutral`, and
-`offline._effective_register()` decides from what was *actually* collected
-which opener/closer to use — a casual talk that opens with みなさん、こんにちは
-sounds like two speakers spliced together.
+warns. When it needs more material it looks for the *same register one level
+away* before taking another register at the requested level - a casual talk
+that switches to です・ます halfway sounds like two speakers, and one level off
+with a consistent voice does not. `corpus.passages_for(level, register)` returns
+`wanted + neutral`, and `offline._effective_register()` decides from what was
+*actually* collected which opener/closer to use — a casual talk that opens with
+みなさん、こんにちは sounds like two speakers spliced together.
 
 **Online sources live in `content/sources.py`.** Each `Source` is a small
 independent fetcher with an `id`, a register and a list of levels it suits;
@@ -189,7 +192,34 @@ These each cost real debugging time. Please keep the guarding tests.
     while a casual retelling overlaps its polite twin at 0.32-0.39. Guarded by
     `test_the_same_story_is_not_told_twice`.
 
-16. **Seeking is by byte offset, not by seconds.** `SentenceTiming.start` is
+16. **A descriptive User-Agent gets 401 from Japanese news CDNs.** NHK News Web
+    Easy's article list is public and unauthenticated but sits behind a WAF
+    that rejects anything non-browser, which killed the one source beginners
+    most need. `net.USER_AGENT` identifies as a browser and sends Accept /
+    Accept-Language. `NHK_EASY_LISTS` also holds every known URL for that file
+    because NHK has moved it before.
+
+17. **Determinism is the enemy of the online mode.** A ranked pipeline returns
+    the same lesson for a topic forever, which is what users notice first.
+    Every pick is sampled instead: `sources._sample` for feeds, entries and
+    search hits, `sources_for` shuffling within each register/level tier, and
+    `online.generate` choosing at random among candidates within `_TIE_BAND` of
+    the best score. Keep new selection code sampling. Guarded by
+    `test_ordering_varies_between_calls`,
+    `test_the_lead_entry_varies_between_calls` and
+    `test_repeated_searches_do_not_return_the_same_article`; the stub tests
+    pass a seeded `rng` so they stay reproducible.
+
+18. **Register needs positive evidence on both sides.** `written_ratio`
+    ("plain and not colloquial") is a fine *difficulty* feature but a bad
+    register test: real speech is full of unmarked plain sentences, so
+    減らすくらいならできそう scored as an essay. `colloquial_score` uses
+    `literary_ratio` (`_LITERARY_RE`: である, における, とされる …) instead.
+    Measured over the corpus the bands do not overlap - spoken 0.57-1.00,
+    neutral ~0.50, written 0.07-0.43 - and
+    `test_the_corpus_registers_land_in_their_own_bands` fails if they start to.
+
+19. **Seeking is by byte offset, not by seconds.** `SentenceTiming.start` is
     only meaningful for PCM - an MP3 stream cannot be measured without decoding
     it - but `concat()` joins clips byte for byte, so `offset_bytes` is exact
     for both containers. That is what lets "play from this sentence" work on

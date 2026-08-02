@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import random
+import re
+
 import pytest
 
 from autotutor.config import Settings
@@ -346,6 +349,36 @@ class TestOfflineRegister:
         if not delivered:
             assert any("口语" in w for w in lesson.warnings), lesson.warnings
 
+    @pytest.mark.parametrize("topic_id", TOPIC_IDS)
+    def test_a_casual_lesson_keeps_one_voice(self, offline_settings, topic_id):
+        """Switching to です・ます halfway sounds like a second speaker.
+
+        Below N4 a single conversational passage rarely fills the time, so the
+        composer reaches one level sideways for more of the same voice before
+        it falls back to the polite passages.
+        """
+        for level in ("N5", "N4", "N3"):
+            lesson = self._lesson(
+                offline_settings, REGISTER_SPOKEN, level=level, topic=topic_id
+            )
+            assert colloquial_score(lesson.plain_text) > 0.6, (
+                f"{topic_id}/{level}: {lesson.plain_text[:70]}"
+            )
+
+    def test_modern_speech_markers_are_present(self):
+        """The conversational corpus should read as people actually talk."""
+        modern = ("まじで", "めっちゃ", "ぶっちゃけ", "てか", "やばい", "じゃん",
+                  "っていうか", "スマホ", "ネット", "普通に")
+        hits = 0
+        for topic_id in TOPIC_IDS:
+            for passage in load_topic(topic_id).passages:
+                if passage.register != REGISTER_SPOKEN:
+                    continue
+                text = "".join(s.ja for s in passage.sentences)
+                if any(marker in text for marker in modern):
+                    hits += 1
+        assert hits >= 20, f"only {hits} conversational passages sound contemporary"
+
     def test_neutral_filler_does_not_out_vote_the_passages(self):
         """です・ます extras suit either request, so they abstain from the vote."""
         from autotutor.content.offline import _Block, _effective_register
@@ -496,6 +529,44 @@ class TestSourceRegistry:
         ids = {s.id for s in sources_for("auto", "N3")}
         assert ids == set(AUTO_SOURCE_IDS)
 
+    def test_ordering_varies_between_calls(self):
+        """A fixed order meant N2/N1 got Wikipedia forever."""
+        leads = {sources_for("written", "N1")[0].id for _ in range(30)}
+        assert len(leads) > 1, leads
+
+    def test_variety_never_breaks_the_register_tiers(self):
+        for _ in range(30):
+            ordered = sources_for(REGISTER_SPOKEN, "N3")
+            spoken = [i for i, s in enumerate(ordered) if s.register == "spoken"]
+            written = [i for i, s in enumerate(ordered) if s.register == "written"]
+            assert max(spoken) < min(written), [s.id for s in ordered]
+
+    def test_advanced_levels_have_more_than_one_good_option(self):
+        """One source for a level is the same lesson every time by definition."""
+        for level in ("N2", "N1"):
+            suited = [
+                s for s in sources_for(REGISTER_WRITTEN, level)
+                if not s.best_levels or level in s.best_levels
+            ]
+            assert len(suited) >= 3, (level, [s.id for s in suited])
+
+    def test_every_register_has_several_sources(self):
+        for register in (REGISTER_SPOKEN, REGISTER_WRITTEN):
+            matching = [s for s in SOURCES if s.register == register]
+            assert len(matching) >= 3, register
+
+    def test_feeds_are_https_and_unique(self):
+        from autotutor.content.sources import (
+            BLOG_FEEDS, NEWS_FEEDS, PODCAST_FEEDS, TECH_FEEDS,
+        )
+
+        urls = []
+        for group in (PODCAST_FEEDS, NEWS_FEEDS, TECH_FEEDS, BLOG_FEEDS):
+            for feed in group:
+                assert feed["name"] and feed["url"].startswith("https://"), feed
+                urls.append(feed["url"])
+        assert len(urls) == len(set(urls)), "duplicate feed"
+
 
 class TestFeedParsing:
     RSS = """<?xml version="1.0" encoding="UTF-8"?>
@@ -545,18 +616,29 @@ class TestFeedParsing:
         long = {"title": "長い", "summary": "あ" * 300}
         assert _substantial_first([short, long]) == [long, short]
 
-    def test_order_is_kept_within_each_group(self):
+    def test_every_entry_survives_the_reordering(self):
         from autotutor.content.sources import _substantial_first
 
         a = {"title": "A", "summary": "あ" * 300}
         b = {"title": "B", "summary": "い" * 300}
-        assert _substantial_first([a, b]) == [a, b]
+        c = {"title": "C", "summary": "短い。"}
+        assert sorted(
+            _substantial_first([a, b, c]), key=lambda e: e["title"]
+        ) == [a, b, c]
 
     def test_a_feed_of_short_notes_is_degraded_not_rejected(self):
         from autotutor.content.sources import _substantial_first
 
         entries = [{"title": "A", "summary": "短い。"}, {"title": "B", "summary": "短い。"}]
-        assert _substantial_first(entries) == entries
+        assert sorted(_substantial_first(entries), key=lambda e: e["title"]) == entries
+
+    def test_the_lead_entry_varies_between_calls(self):
+        """Same feed, different lesson - otherwise the app repeats itself."""
+        from autotutor.content.sources import _substantial_first
+
+        entries = [{"title": chr(65 + n), "summary": "あ" * 300} for n in range(8)]
+        leads = {_substantial_first(entries)[0]["title"] for _ in range(20)}
+        assert len(leads) > 1, leads
 
     def test_malformed_feed_raises_source_error(self):
         with pytest.raises(SourceError):
@@ -621,14 +703,43 @@ class TestColloquialScore:
         assert colloquial_score(CASUAL_TEXT) > 0.7
 
     def test_written_text_scores_low(self):
-        assert colloquial_score(FORMAL_TEXT) < 0.3
+        assert colloquial_score(FORMAL_TEXT) < 0.45
 
     def test_polite_textbook_text_sits_in_the_middle(self):
         score = colloquial_score("私は毎朝六時に起きます。朝ご飯はパンです。")
-        assert 0.3 <= score <= 0.7
+        assert score == pytest.approx(0.5)
+
+    def test_the_three_registers_are_ordered(self):
+        polite = colloquial_score("私は毎朝六時に起きます。朝ご飯はパンです。")
+        assert colloquial_score(FORMAL_TEXT) < polite < colloquial_score(CASUAL_TEXT)
+
+    def test_unmarked_plain_speech_is_not_treated_as_an_essay(self):
+        """Real speech is full of plain sentences with no 終助詞 at all.
+
+        Counting those as literary is what made a conversational passage
+        score as formal once the corpus started sounding natural.
+        """
+        assert colloquial_score("完全にやめるのは無理だけど、減らすくらいならできそう。") >= 0.5
+
+    def test_a_literary_marker_is_what_makes_it_written(self):
+        assert colloquial_score("それは今後の課題であると言えるだろう。") < 0.5
 
     def test_empty_text(self):
         assert colloquial_score("") == 0.0
+
+    @pytest.mark.parametrize("register", ["spoken", "neutral", "written"])
+    def test_the_corpus_registers_land_in_their_own_bands(self, register):
+        """Measured over the bundled corpus, the three bands do not overlap."""
+        bands = {"spoken": (0.55, 1.0), "neutral": (0.35, 0.6), "written": (0.0, 0.45)}
+        low, high = bands[register]
+        for topic_id in TOPIC_IDS:
+            for passage in load_topic(topic_id).passages:
+                if passage.register != register:
+                    continue
+                score = colloquial_score("".join(s.ja for s in passage.sentences))
+                assert low <= score <= high, (
+                    f"{topic_id}/{passage.level}: {score:.2f} outside {low}-{high}"
+                )
 
 
 class TestOnlineGeneratorWithStubs:
@@ -691,13 +802,18 @@ class TestOnlineGeneratorWithStubs:
             setattr(settings, key, value)
         return settings
 
+    def _generator(self, stubbed, settings=None, seed=7):
+        """Seeded: near-tied candidates are picked at random in production."""
+        return stubbed.OnlineGenerator(settings or self._settings(),
+                                       rng=random.Random(seed))
+
     def _request(self, **kwargs):
         base = dict(level="N3", topic="programming", length="short", source="online")
         base.update(kwargs)
         return GenerationRequest(**base)
 
     def test_written_request_uses_a_written_source(self, stubbed):
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(register=REGISTER_WRITTEN)
         )
         assert "ウィキペディア" in lesson.source_label
@@ -705,7 +821,7 @@ class TestOnlineGeneratorWithStubs:
         assert all(s.zh for s in lesson.sentences)
 
     def test_spoken_request_uses_a_spoken_source(self, stubbed):
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(register=REGISTER_SPOKEN)
         )
         assert lesson.source_label == "テスト番組"
@@ -714,26 +830,26 @@ class TestOnlineGeneratorWithStubs:
     def test_disabled_sources_are_not_asked(self, stubbed):
         """Only the podcast is enabled, so a written request still gets it."""
         settings = self._settings(sources="podcast")
-        lesson = stubbed.OnlineGenerator(settings).generate(
+        lesson = self._generator(stubbed, settings).generate(
             self._request(register=REGISTER_WRITTEN)
         )
         assert lesson.source_label == "テスト番組"
         assert any("语体" in w for w in lesson.warnings)
 
     def test_failing_sources_are_reported_but_not_fatal(self, stubbed):
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(self._request())
+        lesson = self._generator(stubbed).generate(self._request())
         assert any("来源" in w for w in lesson.warnings)
         assert lesson.sentences
 
     def test_all_sources_failing_raises(self, stubbed):
         settings = self._settings(sources="nhk_easy,nhk_news")
         with pytest.raises(stubbed.OnlineError):
-            stubbed.OnlineGenerator(settings).generate(self._request())
+            self._generator(stubbed, settings).generate(self._request())
 
     def test_difficulty_gap_produces_a_warning(self, stubbed):
         """Encyclopedic prose offered to an N5 learner has to say so."""
         settings = self._settings(sources="wikipedia")
-        lesson = stubbed.OnlineGenerator(settings).generate(
+        lesson = self._generator(stubbed, settings).generate(
             self._request(level="N5", register=REGISTER_WRITTEN)
         )
         assert any("难度" in w for w in lesson.warnings)
@@ -746,14 +862,14 @@ class TestOnlineGeneratorWithStubs:
         A register miss is worth about one level, so the podcast wins here -
         but not at N2, where the gap grows to two levels.
         """
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(level="N3", register=REGISTER_SPOKEN)
         )
         assert lesson.source_label == "テスト番組"
 
     def test_a_large_level_gap_still_wins(self, stubbed):
         """Register is a preference, not a licence to hand N5 material to N1."""
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(level="N2", register=REGISTER_SPOKEN)
         )
         assert "ウィキペディア" in lesson.source_label
@@ -793,7 +909,7 @@ class TestOnlineGeneratorWithStubs:
         ]
         monkeypatch.setattr(sources_module, "SOURCES", patched)
 
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(level="N3", length="long", register=REGISTER_WRITTEN)
         )
         assert lesson.source_label == "長"
@@ -830,15 +946,17 @@ class TestOnlineGeneratorWithStubs:
         ]
         monkeypatch.setattr(sources_module, "SOURCES", patched)
 
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(length="long", register=REGISTER_SPOKEN)
         )
         assert lesson.source_label == "テスト番組"
         merged = [w for w in lesson.warnings if "接续" in w or "合并" in w]
         assert merged, lesson.warnings
-        # The other episode of the same programme is used up before reaching
-        # for an unrelated news item.
-        assert merged[0].index("第11回") < merged[0].index("ニュース"), merged[0]
+        # Whichever episode led, the other one is used up before reaching for
+        # an unrelated news item.
+        episode = re.search(r"第\d+回", merged[0])
+        assert episode, merged[0]
+        assert episode.start() < merged[0].index("ニュース"), merged[0]
 
     def test_merging_within_one_source_says_so(self, stubbed, monkeypatch):
         from autotutor.content import sources as sources_module
@@ -864,14 +982,48 @@ class TestOnlineGeneratorWithStubs:
         ]
         monkeypatch.setattr(sources_module, "SOURCES", patched)
 
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(length="long", register=REGISTER_SPOKEN)
         )
         merged = [w for w in lesson.warnings if "接续" in w]
         assert merged and "同一来源" in merged[0], lesson.warnings
 
+    def test_repeated_searches_do_not_return_the_same_article(
+        self, stubbed, monkeypatch
+    ):
+        """The loudest complaint about online mode: it repeats itself."""
+        from autotutor.content import sources as sources_module
+
+        def many(query="", timeout=20, limit=4):
+            return [
+                Article(title=f"記事{n}", text=FORMAL_TEXT.replace("。", f"{n}。"),
+                        url=f"u{n}", source_label=f"来源{n}",
+                        source_id="wikipedia", register=REGISTER_WRITTEN)
+                for n in range(6)
+            ]
+
+        patched = [
+            sources_module.Source(
+                s.id, s.label_zh, s.register,
+                many if s.id == "wikipedia"
+                else (lambda *a, **k: (_ for _ in ()).throw(SourceError("x"))),
+                s.best_levels, s.note_zh,
+            )
+            for s in sources_module.SOURCES
+        ]
+        monkeypatch.setattr(sources_module, "SOURCES", patched)
+
+        settings = self._settings(sources="wikipedia")
+        titles = {
+            stubbed.OnlineGenerator(settings).generate(
+                self._request(register=REGISTER_WRITTEN)
+            ).title_ja
+            for _ in range(12)
+        }
+        assert len(titles) > 1, titles
+
     def test_web_text_is_annotated(self, stubbed):
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(self._request())
+        lesson = self._generator(stubbed).generate(self._request())
         for sentence in lesson.sentences:
             assert "".join(seg.text for seg in sentence.ruby) == sentence.ja
             assert sentence.kana
@@ -886,7 +1038,7 @@ class TestOnlineGeneratorWithStubs:
 
         monkeypatch.setattr(sources_module, "fetch_youtube_captions", fake_captions)
         monkeypatch.setattr(stubbed, "fetch_youtube_captions", fake_captions)
-        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+        lesson = self._generator(stubbed).generate(
             self._request(topic=CUSTOM_TOPIC,
                           custom_topic="https://youtu.be/dQw4w9WgXcQ")
         )

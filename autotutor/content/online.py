@@ -47,6 +47,12 @@ from .sources import (
 
 # Warn once the text is more than a full JLPT level away from the request.
 _LEVEL_GAP_WARNING = 1.0
+# Candidates within this much of the best score are treated as tied and one is
+# picked at random. Well under the cost of a register miss or a level, so the
+# variety never comes at the expense of a match the learner would notice.
+_TIE_BAND = 0.35
+# How many articles to gather before ranking them.
+_MAX_ARTICLES = 8
 
 __all__ = [
     "Article",
@@ -101,15 +107,19 @@ def clean_sentences(text: str) -> List[str]:
 def colloquial_score(text: str) -> float:
     """0.0 (formal written prose) .. 1.0 (clearly conversational).
 
-    Built on the same sentence-ending statistics the difficulty model uses, so
-    the two never disagree about what "casual" means. です・ます lands in the
-    middle at 0.5: polite Japanese is neither speech nor literary prose, and
-    a learner who asked for either can live with it.
+    Positive evidence on both sides, from the sentence-ending statistics the
+    difficulty model shares, so the two never disagree about what "casual"
+    means. です・ます lands in the middle at 0.5: polite Japanese is neither
+    speech nor literary prose, and a learner who asked for either can live
+    with it. So does unmarked plain form - real speech is full of it, and
+    treating every 気がする as an essay is what made conversational passages
+    score as formal.
     """
     if not (text or "").strip():
         return 0.0
     stats = analyse(text)
-    return max(0.0, min(1.0, 0.5 + 0.5 * stats.casual_ratio - 0.5 * stats.written_ratio))
+    score = 0.5 + 0.5 * stats.casual_ratio - 0.5 * stats.literary_ratio
+    return max(0.0, min(1.0, score))
 
 
 def _register_penalty(text: str, register: str) -> float:
@@ -229,19 +239,21 @@ class OnlineGenerator:
     def _collect(self, request: GenerationRequest, warnings: List[str]) -> List[Article]:
         timeout = self.settings.request_timeout
         _topic_id, terms = self._search_terms(request)
-        primary = terms[0] if terms else ""
 
         articles: List[Article] = []
         failures: List[str] = []
         enabled = self.settings.enabled_source_ids()
 
-        for source in sources_for(request.register, request.level):
-            if len(articles) >= 5:
+        for index, source in enumerate(sources_for(request.register, request.level)):
+            if len(articles) >= _MAX_ARTICLES:
                 break
             if source.id not in enabled:
                 continue
+            # A different search term per source widens what comes back, so two
+            # runs on the same topic are not looking at the same page twice.
+            term = terms[index % len(terms)] if terms else ""
             try:
-                found = source.fetch(primary, timeout)
+                found = source.fetch(term, timeout)
             except (SourceError, NetworkError) as exc:
                 failures.append(f"{source.label_zh}：{exc}")
                 continue
@@ -300,13 +312,21 @@ class OnlineGenerator:
         # of listening practice is a continuous piece of speech, so a text long
         # enough to stand on its own is worth about a level of difficulty miss.
         candidates.sort(key=lambda item: item[3])
-        article, window, distance, _ = candidates[0]
+        # Then pick at random from the ones that are near enough to tied. Taking
+        # the strict minimum makes the same topic give the same lesson forever,
+        # and the difference between a 0.4 and a 0.5 cost is not something the
+        # learner can hear.
+        best = candidates[0][3]
+        contenders = [c for c in candidates if c[3] <= best + _TIE_BAND]
+        chosen = self.rng.choice(contenders)
+        article, window, distance, _ = chosen
+        remaining = [c for c in candidates if c is not chosen]
 
         # Only if one source truly cannot fill the time. Same source first, so
         # a podcast is extended with the same programme rather than a news feed.
         extra_sources: List[Article] = []
         rest = sorted(
-            candidates[1:],
+            remaining,
             key=lambda item: (item[0].source_id != article.source_id, item[3]),
         )
         for other, other_window, _, _cost in rest:

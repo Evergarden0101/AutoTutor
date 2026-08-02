@@ -281,21 +281,45 @@ class OfflineGenerator:
                 blocks.append(block)
                 total += block.seconds
 
-        # 1. Passages at the requested level, freshest first.
-        preferred = self._passage_blocks(corpus, level, used, register)
-        # Register first, then freshness: demoting a recently heard passage must
-        # not promote one in the register the learner did not ask for.
-        preferred.sort(key=lambda b: (
-            bool(register) and register != REGISTER_AUTO and b.register != register,
-            avoid_repeats and self._key(b.topic_id, Passage(
-                b.level, b.title_ja, b.title_zh, [])) in self._recent,
-        ))
-        take(preferred, mark_transition=True)
+        asked = register if register != REGISTER_AUTO else ""
+        stepped_out = False
 
-        # 2. Neighbouring levels of the same topic - still whole passages, so
-        #    the lesson keeps reading as connected prose.
+        def fresh_first(blocks: List[_Block]) -> List[_Block]:
+            """Demote passages the learner heard recently, keeping order otherwise."""
+            return sorted(blocks, key=lambda b: (
+                avoid_repeats and self._key(b.topic_id, Passage(
+                    b.level, b.title_ja, b.title_zh, [])) in self._recent,
+            ))
+
+        def in_register(blocks: List[_Block]) -> List[_Block]:
+            return [b for b in blocks if b.register == asked] if asked else blocks
+
+        # 1. Passages at the requested level, in the requested register.
+        preferred = self._passage_blocks(corpus, level, used, register)
+        take(fresh_first(in_register(preferred)), mark_transition=True)
+
+        # 2. The same register one level away, before giving up on the voice.
+        #    A casual talk that switches to です・ます halfway sounds like two
+        #    different people; one level off with a consistent voice does not.
+        if asked and total < enough:
+            for candidate_level in nearest_levels(level)[1:3]:
+                if total >= budget:
+                    break
+                more = in_register(
+                    self._passage_blocks(corpus, candidate_level, used, register)
+                )
+                if more:
+                    stepped_out = True
+                    take(fresh_first(more), mark_transition=True)
+
+        # 3. Whatever else this level has - the neutral です・ます fallback.
         if total < enough:
-            stepped_out = False
+            take(fresh_first(self._passage_blocks(corpus, level, used, register)),
+                 mark_transition=True)
+
+        # 4. Neighbouring levels of the same topic, any register - still whole
+        #    passages, so the lesson keeps reading as connected prose.
+        if total < enough:
             for candidate_level in nearest_levels(level)[1:]:
                 if total >= budget:
                     break
@@ -303,11 +327,11 @@ class OfflineGenerator:
                 if more:
                     stepped_out = True
                     take(more, mark_transition=True)
-            if stepped_out:
-                warnings.append(
-                    f"所选长度超出了「{level}」级别在这个主题下的语料量，"
-                    "已补充相邻级别的同主题内容。想要严格贴合级别，请选择更短的长度。"
-                )
+        if stepped_out:
+            warnings.append(
+                f"所选长度超出了「{level}」级别在这个主题下的语料量，"
+                "已补充相邻级别的同主题内容。想要严格贴合级别，请选择更短的长度。"
+            )
 
         # 3. A different topic, same level.
         if total < enough:

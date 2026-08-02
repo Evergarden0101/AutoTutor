@@ -11,20 +11,28 @@ spoken/written choice possible:
 source           register    what it gives you
 ===============  ==========  ==========================================
 nhk_easy         written     news rewritten for learners (N5-N4)
-nhk_news         written     national news headlines and summaries
+nhk_news         written     national news, seven category feeds
+tech             written     ITmedia / GIGAZINE, modern vocabulary
 wikinews         written     current-affairs articles
 wikipedia        written     encyclopedic prose, any topic
 podcast          spoken      episode notes from Japanese podcast feeds
+blog             spoken      personal blogs and popular entries
 youtube          spoken      captions from a video URL you paste
 ===============  ==========  ==========================================
 
 Nothing here needs an API key.
+
+Everything that picks - which feed leads, which entry, which search hit, which
+source goes first among equals - is sampled rather than taken from the head.
+A deterministic pipeline returns the same lesson for a topic forever, which is
+the single loudest complaint the online mode attracts.
 """
 
 from __future__ import annotations
 
 import html
 import json
+import random
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -41,6 +49,18 @@ REGISTER_ANY = "any"
 
 class SourceError(RuntimeError):
     """A single source failed; the caller should try the next one."""
+
+
+def _sample(items: Sequence, count: int) -> List:
+    """Up to ``count`` items in random order.
+
+    Feeds and search results are ranked by recency or relevance, so always
+    taking the head means the same lesson every time. Sampling instead is what
+    makes pressing 生成课文 twice give two different lessons.
+    """
+    pool = list(items)
+    random.shuffle(pool)
+    return pool[:count]
 
 
 @dataclass
@@ -288,16 +308,50 @@ PODCAST_FEEDS: List[Dict[str, str]] = [
     {"name": "バイリンガルニュース", "url": "https://bilingualnews.libsyn.com/rss"},
     {"name": "Nihongo con Teppei", "url": "https://anchor.fm/s/1ad4c6c/podcast/rss"},
     {"name": "日本語の聴解", "url": "https://anchor.fm/s/2e4b8a4/podcast/rss"},
+    {"name": "そんな今日この頃", "url": "https://anchor.fm/s/2b3c0e0/podcast/rss"},
+    {"name": "Japanese with Shun", "url": "https://anchor.fm/s/6b1f2a4/podcast/rss"},
+    {"name": "ゆる言語学ラジオ", "url": "https://anchor.fm/s/57a1a3c/podcast/rss"},
 ]
 
 NEWS_FEEDS: List[Dict[str, str]] = [
     {"name": "NHK 主要ニュース", "url": "https://www.nhk.or.jp/rss/news/cat0.xml"},
     {"name": "NHK 生活・科学", "url": "https://www.nhk.or.jp/rss/news/cat3.xml"},
+    {"name": "NHK 社会", "url": "https://www.nhk.or.jp/rss/news/cat1.xml"},
+    {"name": "NHK 文化・エンタメ", "url": "https://www.nhk.or.jp/rss/news/cat2.xml"},
+    {"name": "NHK 経済", "url": "https://www.nhk.or.jp/rss/news/cat5.xml"},
+    {"name": "NHK スポーツ", "url": "https://www.nhk.or.jp/rss/news/cat7.xml"},
+    {"name": "NHK 国際", "url": "https://www.nhk.or.jp/rss/news/cat6.xml"},
+]
+
+# Technology and popular science: modern vocabulary, less formal than a
+# newspaper editorial, and a much better match for N2 than an encyclopedia.
+TECH_FEEDS: List[Dict[str, str]] = [
+    {"name": "ITmedia NEWS", "url": "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"},
+    {"name": "ITmedia AI+", "url": "https://rss.itmedia.co.jp/rss/2.0/aiplus.xml"},
+    {"name": "GIGAZINE", "url": "https://gigazine.net/news/rss_2.0/"},
+    {"name": "はてなブックマーク テクノロジー",
+     "url": "https://b.hatena.ne.jp/hotentry/it.rss"},
+]
+
+# Blogs and personal writing: the closest thing to how people actually write to
+# each other, which is where the conversational register really lives online.
+BLOG_FEEDS: List[Dict[str, str]] = [
+    {"name": "はてなブックマーク 人気エントリー",
+     "url": "https://b.hatena.ne.jp/hotentry/all.rss"},
+    {"name": "はてなブックマーク 暮らし",
+     "url": "https://b.hatena.ne.jp/hotentry/life.rss"},
+    {"name": "はてなブックマーク エンタメ",
+     "url": "https://b.hatena.ne.jp/hotentry/entertainment.rss"},
+    {"name": "はてなブログ 新着", "url": "https://blog.hatena.ne.jp/-/hotentry.rss"},
 ]
 
 WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
 WIKINEWS_API = "https://ja.wikinews.org/w/api.php"
-NHK_EASY_LIST = "https://www3.nhk.or.jp/news/easy/news-list.json"
+# NHK has moved this file more than once; try each in turn.
+NHK_EASY_LISTS = [
+    "https://www3.nhk.or.jp/news/easy/news-list.json",
+    "https://www3.nhk.or.jp/news/easy/top-list.json",
+]
 NHK_EASY_ARTICLE = "https://www3.nhk.or.jp/news/easy/{news_id}/{news_id}.html"
 
 
@@ -325,7 +379,9 @@ def _feed_articles(
     """Turn a set of RSS feeds into articles, tolerating individual failures."""
     articles: List[Article] = []
     errors: List[str] = []
-    for feed in feeds:
+    # A different feed leads on each run, so a topic is not permanently tied to
+    # whichever feed happens to be listed first.
+    for feed in _sample(feeds, len(feeds)):
         if len(articles) >= limit:
             break
         try:
@@ -365,18 +421,20 @@ _SUBSTANTIAL_CHARS = 200
 
 
 def _substantial_first(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Entries that can stand alone first, the rest after, order preserved.
+    """Entries that can stand alone first, the rest after, shuffled within each.
 
-    Not a plain sort by length: within each group the feed's own order is kept
-    so the newest episode still wins ties, and a feed of uniformly short notes
-    is degraded rather than rejected.
+    Not a plain sort by length: a feed of uniformly short notes is degraded
+    rather than rejected. Shuffling inside each group is what stops the same
+    (newest, or longest) episode being the lesson every single time.
     """
     def size(entry: Dict[str, str]) -> int:
         return len(entry.get("title", "")) + len(entry.get("summary", ""))
 
     big = [e for e in entries if size(e) >= _SUBSTANTIAL_CHARS]
     small = [e for e in entries if size(e) < _SUBSTANTIAL_CHARS]
-    return big + small
+    # Shuffled inside each group: a feed's newest entry is always the same one,
+    # and every substantial entry is equally good as a lesson.
+    return _sample(big, len(big)) + _sample(small, len(small))
 
 
 def fetch_podcasts(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
@@ -385,6 +443,14 @@ def fetch_podcasts(query: str = "", timeout: int = 20, limit: int = 4) -> List[A
 
 def fetch_news_feeds(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
     return _feed_articles(NEWS_FEEDS, "nhk_news", REGISTER_WRITTEN, timeout, query, limit)
+
+
+def fetch_tech_feeds(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
+    return _feed_articles(TECH_FEEDS, "tech", REGISTER_WRITTEN, timeout, query, limit)
+
+
+def fetch_blog_feeds(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
+    return _feed_articles(BLOG_FEEDS, "blog", REGISTER_SPOKEN, timeout, query, limit)
 
 
 def fetch_wikipedia(query: str = "", timeout: int = 20, limit: int = 3) -> List[Article]:
@@ -405,12 +471,15 @@ def _fetch_mediawiki(api, source_id, label, base_url, query, timeout, limit):
     if not query:
         raise SourceError("需要一个搜索关键词。")
     try:
-        titles = mediawiki_search(api, query, timeout, limit)
+        # Ask for more than we need so there is something to choose between:
+        # the top hit for a term never changes, which made every lesson on a
+        # topic identical.
+        titles = mediawiki_search(api, query, timeout, limit * 3)
     except NetworkError as exc:
         raise SourceError(str(exc)) from exc
 
     articles: List[Article] = []
-    for title in titles[:limit]:
+    for title in _sample(titles, limit):
         try:
             extract = mediawiki_extract(api, title, timeout)
         except NetworkError:
@@ -432,27 +501,60 @@ def _fetch_mediawiki(api, source_id, label, base_url, query, timeout, limit):
     return articles
 
 
-def fetch_nhk_easy(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
-    """Recent NHK News Web Easy articles, optionally filtered by keyword."""
-    raw = get_text(NHK_EASY_LIST, timeout=timeout).lstrip("﻿")
-    try:
-        data = json.loads(raw)
-    except ValueError as exc:
-        raise SourceError(f"NHK Easy 返回的内容无法解析：{exc}") from exc
+def _nhk_easy_index(timeout: int) -> List[dict]:
+    """The article list, trying each known endpoint before giving up.
 
+    NHK has moved this file before and fronts it with a CDN that answers a
+    non-browser client with 401, so a single hardcoded URL is a single point of
+    failure for the source that beginners need most.
+    """
+    errors: List[str] = []
+    for url in NHK_EASY_LISTS:
+        try:
+            raw = get_text(url, timeout=timeout).lstrip("﻿")
+        except NetworkError as exc:
+            errors.append(f"{url}: {exc}")
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            errors.append(f"{url}: {exc}")
+            continue
+        items = _nhk_easy_items(data)
+        if items:
+            return items
+        errors.append(f"{url}: 没有文章")
+    raise SourceError("；".join(errors[:2]) or "NHK Easy 没有返回文章列表。")
+
+
+def _nhk_easy_items(data) -> List[dict]:
+    """Flatten either shape NHK has used: a list of day-keyed dicts, or a list."""
     items: List[dict] = []
     if isinstance(data, list):
         for group in data:
             if isinstance(group, dict):
+                if group.get("news_id"):
+                    items.append(group)
+                    continue
                 for _day, entries in sorted(group.items(), reverse=True):
                     if isinstance(entries, list):
                         items.extend(e for e in entries if isinstance(e, dict))
-    if not items:
-        raise SourceError("NHK Easy 没有返回文章列表。")
+    elif isinstance(data, dict):
+        for _day, entries in sorted(data.items(), reverse=True):
+            if isinstance(entries, list):
+                items.extend(e for e in entries if isinstance(e, dict))
+    return items
+
+
+def fetch_nhk_easy(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:
+    """Recent NHK News Web Easy articles, optionally filtered by keyword."""
+    items = _nhk_easy_index(timeout)
 
     if query:
         matched = [i for i in items if query in (i.get("title") or "")]
         items = matched or items
+    # Newest first is always the same lesson; sample across the whole list.
+    items = _sample(items, limit * 3)
 
     articles: List[Article] = []
     for item in items[: limit * 2]:
@@ -502,12 +604,18 @@ SOURCES: List[Source] = [
     Source("podcast", "播客节目笔记", REGISTER_SPOKEN, fetch_podcasts,
            best_levels=("N4", "N3", "N2"),
            note_zh="日语播客的节目简介，语气偏口语。"),
+    Source("blog", "博客与热门文章", REGISTER_SPOKEN, fetch_blog_feeds,
+           best_levels=("N3", "N2", "N1"),
+           note_zh="个人博客与热门话题，最接近日本人平时写给彼此看的文字。"),
     Source("youtube", "YouTube 字幕", REGISTER_SPOKEN, lambda *a, **k: [],
            best_levels=("N4", "N3", "N2", "N1"),
            note_zh="粘贴一个带日语字幕的视频链接，读取它的字幕。"),
     Source("nhk_news", "NHK 新闻", REGISTER_WRITTEN, fetch_news_feeds,
            best_levels=("N3", "N2", "N1"),
-           note_zh="日本国内新闻的标题与摘要。"),
+           note_zh="日本国内新闻的标题与摘要，涵盖社会、经济、体育等分类。"),
+    Source("tech", "科技与数码", REGISTER_WRITTEN, fetch_tech_feeds,
+           best_levels=("N2", "N1"),
+           note_zh="ITmedia、GIGAZINE 等科技报道，词汇现代，比百科好懂。"),
     Source("wikinews", "维基新闻", REGISTER_WRITTEN, fetch_wikinews,
            best_levels=("N3", "N2", "N1"),
            note_zh="时事报道，比维基百科口语一些。"),
@@ -522,12 +630,24 @@ AUTO_SOURCE_IDS: List[str] = [s.id for s in SOURCES if s.id != "youtube"]
 
 
 def sources_for(register: str, level: str) -> List[Source]:
-    """Order the searchable sources for a register and level, best first."""
-    def rank(source: Source) -> tuple:
+    """Order the searchable sources for a register and level, best first.
+
+    Sources that suit the request equally well are shuffled against each other.
+    A fixed order means the first one always wins and the learner sees the same
+    lesson every time - which for N2/N1 meant Wikipedia, forever.
+    """
+    def tier(source: Source) -> tuple:
         register_miss = 0
         if register in (REGISTER_SPOKEN, REGISTER_WRITTEN):
             register_miss = 0 if source.register == register else 1
         level_miss = 0 if (not source.best_levels or level in source.best_levels) else 1
-        return (register_miss, level_miss, SOURCES.index(source))
+        return (register_miss, level_miss)
 
-    return sorted((s for s in SOURCES if s.id in AUTO_SOURCE_IDS), key=rank)
+    usable = [s for s in SOURCES if s.id in AUTO_SOURCE_IDS]
+    groups: Dict[tuple, List[Source]] = {}
+    for source in usable:
+        groups.setdefault(tier(source), []).append(source)
+    ordered: List[Source] = []
+    for key in sorted(groups):
+        ordered.extend(_sample(groups[key], len(groups[key])))
+    return ordered
