@@ -35,6 +35,7 @@ from ..tts import (
     VoiceChoice,
     apply_voice_choice,
     current_voice_choice,
+    get_engine,
     list_engines,
     list_voice_choices,
 )
@@ -80,9 +81,13 @@ class AutoTutorApp(tk.Tk):
         self._cancel = threading.Event()
         self._play_started = 0.0
         self._play_job: Optional[str] = None
+        self._voices_refreshed = False
+        # Which sentence a pending synthesis should start playing from.
+        self._pending_start = 0
 
         self._build()
         self._pump()
+        self._refresh_online_voices()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.lesson_view.show_placeholder(
             "选择级别和主题，然后点击「生成课文」。\n\n"
@@ -273,8 +278,12 @@ class AutoTutorApp(tk.Tk):
         self.voice_box.grid(row=0, column=1, sticky="w")
         self.voice_box.bind("<<ComboboxSelected>>", lambda _e: self._on_voice_change())
         self.voice_hint = ttk.Label(voice_row, text="", style="Muted.TLabel",
-                                    wraplength=560, justify="left")
+                                    wraplength=380, justify="left")
         self.voice_hint.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(
+            voice_row, text="点击任意一句前面的 ▶ 可以从那一句开始朗读",
+            style="Muted.TLabel",
+        ).grid(row=0, column=3, sticky="e", padx=(12, 0))
         self._voice_keys: List[str] = []
         self.refresh_voices()
 
@@ -282,6 +291,7 @@ class AutoTutorApp(tk.Tk):
         self.notebook.grid(row=1, column=0, sticky="nsew")
 
         self.lesson_view = LessonView(self.notebook, self.palette, self.fonts)
+        self.lesson_view.on_play_from = self.play_from
         self.notebook.add(self.lesson_view, text="  课文 / 課文  ")
 
         self.custom_view = ScrollingText(self.notebook, self.palette, self.fonts, wrap="char")
@@ -375,6 +385,26 @@ class AutoTutorApp(tk.Tk):
         # showing, so the next narration uses the voice the learner can see.
         apply_voice_choice(self.settings, self._voice_keys[index])
         self._describe_voice(choices[index])
+
+    def _refresh_online_voices(self) -> None:
+        """Replace the shipped Edge list with what the service actually serves.
+
+        A hardcoded catalogue goes stale silently - offering a voice Microsoft
+        has retired only fails later, at play time. One background round trip,
+        and only if the learner has allowed networking.
+        """
+        if not self.settings.allow_online or self._voices_refreshed:
+            return
+        self._voices_refreshed = True
+        engine = get_engine("edge")
+        if engine is None or not engine.available():
+            return
+
+        def work() -> None:
+            if engine.refresh():
+                self._post(self.refresh_voices)
+
+        self._run_worker(work)
 
     def _describe_voice(self, choice: "VoiceChoice") -> None:
         if choice.requires_network:
@@ -595,24 +625,41 @@ class AutoTutorApp(tk.Tk):
         self.log(f"音频完成：{result.engine_name}{suffix}")
         self.btn_play.configure(state="normal")
         if then_play:
-            self.play()
+            start, self._pending_start = self._pending_start, 0
+            self.play(start)
 
-    def play(self) -> None:
+    def play(self, from_index: int = 0) -> None:
+        """Play the narration, optionally starting at sentence ``from_index``."""
         if not self.lesson:
             return
         if self.narration is None or self.narration.clip is None:
+            self._pending_start = from_index
             self._synthesize(then_play=True)
             return
+
+        from_index = max(0, min(from_index, len(self.lesson.sentences) - 1))
+        clip = self.narration.clip_from(from_index) if from_index else self.narration.clip
         try:
-            self.player.play(self.narration.clip, self.settings.mp3_bitrate)
+            self.player.play(clip, self.settings.mp3_bitrate)
         except (AudioError, OSError) as exc:
             self.log(f"播放失败：{exc}")
             messagebox.showerror(APP_NAME, f"播放失败：\n{exc}", parent=self)
             return
         self.btn_stop.configure(state="normal")
         self.status.start("正在播放…", determinate=True)
-        self._play_started = time.monotonic()
+        # Rewind the clock instead of offsetting every later calculation, so the
+        # cursor tracking works unchanged whichever sentence we started at.
+        self._play_started = time.monotonic() - self.narration.starts_at(from_index)
         self._track_playback()
+
+    def play_from(self, index: int) -> None:
+        """Start reading at one sentence - the ▶ next to it was clicked."""
+        if self._busy:
+            return
+        self.stop()
+        if self.lesson and 0 <= index < len(self.lesson.sentences):
+            self.log(f"从第 {index + 1} 句开始播放。")
+        self.play(index)
 
     def _track_playback(self) -> None:
         """Show where the narration has got to: marker, highlight and clock."""
@@ -770,6 +817,7 @@ class AutoTutorApp(tk.Tk):
         self._on_source_change(self.var_source.get())
         # Turning networking off removes the online voices from the picker.
         self.refresh_voices()
+        self._refresh_online_voices()
         self.log("设置已保存，音频将在下次播放时重新合成。")
 
     def show_about(self) -> None:

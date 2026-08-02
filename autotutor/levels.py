@@ -70,8 +70,11 @@ _POLITE_END_RE = re.compile(r"(ます|ました|ません|でしょう|です|�
 # so these are subtracted from the written-style feature.
 _CASUAL_END_RE = re.compile(
     r"("
-    r"だよ|だね|だな|よね|よな|かな|かなあ|けど|けどね|でしょ|だろ|じゃない|じゃん"
-    r"|んだ|んだよ|んだね|もん|のに|って|してる|ってる|でる"
+    r"だよ|だね|だな|よね|よな|かな|かなあ|かも|けど|けどね|でしょ|だろ|じゃない|じゃん"
+    r"|んだ|んだよ|んだね|もん|のに|って|っけ"
+    # Contracted ている/ておく: 待ってた and 見てる are speech, never an essay.
+    r"|[てで](る|た|ない|なかった)"
+    r"|と(く|いた)"
     r"|[^、。！？!?\s]([よねさわぞ]|っけ|かい)"
     r")[。！？!?]?$"
 )
@@ -85,10 +88,10 @@ _CASUAL_INLINE_RE = re.compile(
 # was redefined. compound_ratio was dropped in this refit: its coefficient is
 # positive but including it inverts the N2/N1 ordering, and the two levels are
 # barely separable by surface statistics anyway.
-_W_KANJI_BAND = 0.557
-_W_SENTENCE_LEN = 0.818
-_W_WRITTEN_STYLE = 1.133
-_W_INTERCEPT = -1.627
+_W_KANJI_BAND = 0.550
+_W_SENTENCE_LEN = 0.803
+_W_WRITTEN_STYLE = 1.141
+_W_INTERCEPT = -1.551
 
 
 @dataclass(frozen=True)

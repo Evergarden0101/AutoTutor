@@ -19,7 +19,7 @@ Target user reads Simplified Chinese and is learning Japanese.
 python -m autotutor                       # GUI
 python -m autotutor --cli --level N5 --topic daily_life --length short
 python -m autotutor --cli --level N3 --topic technology --length xlong   # ~8 min
-python -m pytest -q tests                 # 390 tests, ~12s
+python -m pytest -q tests                 # 449 tests, ~21s
 python -m pyflakes autotutor tests        # lint
 python build_exe.py --clean               # build the executable
 python assets/make_icon.py                # regenerate the icon
@@ -61,8 +61,15 @@ short/medium/long/xlong onto ~60/130/240/450 seconds of narration, and
 `models.estimate_seconds()` converts text to seconds using constants measured
 against the bundled voice (6.9 kana/s, 1.28 kana per written character). The
 offline composer keeps pulling blocks until the budget is met, widening from
-"more passages on this topic" to "neighbouring levels" to "another topic", and
-records each widening in `lesson.warnings`.
+"more passages on this topic" to "neighbouring levels" to "another topic" to
+"loose example sentences", and records each widening in `lesson.warnings`.
+
+**That widening order is load-bearing.** Whole passages always come before
+`extras`, which are single facts glued together with それから and read as a
+list rather than a paragraph; they used to be taken second and made a medium
+lesson listy long before it had to be. Widening also only triggers below
+`_CLOSE_ENOUGH` of the budget - reaching to another level for the last three
+seconds costs a warning and buys material that `_trim_to_budget` throws away.
 
 **Register (语体) is a preference, not a filter.** `GenerationRequest.register`
 is auto/spoken/written. Conversational passages exist at N5–N3 only, so a
@@ -158,9 +165,37 @@ These each cost real debugging time. Please keep the guarding tests.
 13. **Ranking online candidates on level alone throws the register away.** An
     encyclopedia article is almost always a closer level match than a podcast
     note, so `online.generate` adds `_article_register_cost` (worth about one
-    JLPT level) to the sort key. Guarded by
-    `test_register_beats_a_closer_level_match` and, for the other direction,
-    `test_a_large_level_gap_still_wins`.
+    JLPT level) to the sort key. `_coverage_cost` is worth the same and pulls
+    the other way that matters: a source long enough to carry the whole lesson
+    beats a closer-level fragment, because stitching four snippets together to
+    hit the duration is not listening practice. Guarded by
+    `test_register_beats_a_closer_level_match`, `test_a_large_level_gap_still_wins`
+    and `test_a_source_that_can_carry_the_lesson_wins`.
+
+14. **Do not hardcode the Edge voice catalogue.** Edge's free read-aloud
+    endpoint is not Azure Speech and serves far fewer voices.
+    ja-JP-Aoi/Daichi/Mayu/Naoki/Shiori exist in Azure, are all over the
+    tutorials, and make edge-tts fail with "No audio was received. Please
+    verify that your parameters are correct." Only Nanami and Keita are
+    shipped; `EdgeEngine.refresh()` asks the service for the real list in the
+    background. `voices()` must never block on the network - it is called
+    while building the UI. Guarded by `TestEdgeVoices`.
+
+15. **Every topic has a conversational retelling of its polite passage, and
+    playing both says the same thing twice.** `offline._collect_blocks` skips a
+    candidate whose multi-kanji vocabulary overlaps an already-taken block by
+    more than `_OVERLAP_LIMIT`. That threshold is measured, not guessed: across
+    the corpus, unrelated passages sit at a median of 0.00 and p90 of 0.15,
+    while a casual retelling overlaps its polite twin at 0.32-0.39. Guarded by
+    `test_the_same_story_is_not_told_twice`.
+
+16. **Seeking is by byte offset, not by seconds.** `SentenceTiming.start` is
+    only meaningful for PCM - an MP3 stream cannot be measured without decoding
+    it - but `concat()` joins clips byte for byte, so `offset_bytes` is exact
+    for both containers. That is what lets "play from this sentence" work on
+    the online engine too. `play(from_index)` then rewinds `_play_started` by
+    `starts_at(index)` so the cursor tracking needs no other change. Guarded by
+    `TestSeeking`.
 
 ## Conventions
 

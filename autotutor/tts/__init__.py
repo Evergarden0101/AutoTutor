@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional
 
 from ..config import Settings
@@ -35,6 +35,10 @@ __all__ = [
 ]
 
 ENGINE_ORDER = ("openjtalk", "sapi5", "edge")
+
+# Stop hammering a dead engine: if the first few sentences all fail there is
+# nothing to salvage, and narrate() falls back to an offline engine instead.
+_GIVE_UP_AFTER = 2
 
 _ENGINE_CACHE: Dict[str, TTSEngine] = {}
 
@@ -141,11 +145,19 @@ def apply_voice_choice(settings: Settings, key: str) -> None:
 
 @dataclass
 class SentenceTiming:
-    """Where a sentence sits inside the rendered clip, in seconds."""
+    """Where a sentence sits inside the rendered clip.
+
+    ``start``/``end`` are seconds and drive the playback cursor; they are only
+    meaningful for PCM, because an MP3 stream cannot be measured without
+    decoding it. ``offset_bytes`` is exact for both, because :func:`concat`
+    joins clips byte for byte - which is what makes "play from this sentence"
+    work on either engine.
+    """
 
     index: int
     start: float
     end: float
+    offset_bytes: int = 0
 
 
 @dataclass
@@ -165,6 +177,32 @@ class NarrationResult:
     def has_timings(self) -> bool:
         """MP3 clips from the online engine cannot be measured without decoding."""
         return bool(self.timings) and isinstance(self.clip, PcmClip)
+
+    @property
+    def can_seek(self) -> bool:
+        """Whether playback can start from an arbitrary sentence."""
+        return bool(self.timings) and self.clip is not None
+
+    def clip_from(self, index: int):
+        """The narration from sentence ``index`` onwards.
+
+        Byte offsets rather than seconds, so this is exact for MP3 too: every
+        sentence begins at the start of its own stream inside the join.
+        """
+        if self.clip is None:
+            return None
+        timing = next((t for t in self.timings if t.index >= index), None)
+        if timing is None or timing.offset_bytes <= 0:
+            return self.clip
+        data = getattr(self.clip, "data", b"")[timing.offset_bytes:]
+        if not data:
+            return self.clip
+        return replace(self.clip, data=data)
+
+    def starts_at(self, index: int) -> float:
+        """When sentence ``index`` begins, in seconds (0.0 if unknown)."""
+        timing = next((t for t in self.timings if t.index >= index), None)
+        return timing.start if timing else 0.0
 
 
 class Narrator:
@@ -209,6 +247,15 @@ class Narrator:
             return self.settings.sapi_voice
         return ""
 
+    def _offline_fallback(self, failed: TTSEngine) -> Optional[TTSEngine]:
+        """The best usable engine that is not ``failed`` and needs no network."""
+        for engine in list_engines():
+            if engine.id == failed.id or engine.requires_network:
+                continue
+            if engine.available():
+                return engine
+        return None
+
     def narrate(
         self,
         lesson: Lesson,
@@ -219,6 +266,26 @@ class Narrator:
         if engine is None:
             return NarrationResult(None, warnings=warnings)
 
+        result = self._render(engine, lesson, warnings, progress, cancel)
+        if result.clip is not None or result.cancelled:
+            return result
+
+        # A retired online voice streams nothing at all. Falling back keeps the
+        # promise that a network problem never leaves the learner with silence.
+        spare = self._offline_fallback(engine)
+        if spare is None:
+            return result
+        result.warnings.append(f"{engine.name}没有生成音频，已改用{spare.name}。")
+        return self._render(spare, lesson, result.warnings, progress, cancel)
+
+    def _render(
+        self,
+        engine: TTSEngine,
+        lesson: Lesson,
+        warnings: List[str],
+        progress: Optional[Callable[[int, int], None]] = None,
+        cancel: Optional[threading.Event] = None,
+    ) -> NarrationResult:
         voice = self._voice_for(engine)
         # Slow the delivery down for beginners, speed it up for advanced material.
         rate = self.settings.speech_rate * get_level(lesson.level).speech_rate
@@ -229,11 +296,13 @@ class Narrator:
         pieces: List[object] = []
         timings: List[SentenceTiming] = []
         elapsed = 0.0
+        written = 0
 
         def push(piece) -> None:
-            nonlocal elapsed
+            nonlocal elapsed, written
             pieces.append(piece)
             elapsed += getattr(piece, "duration", 0.0)
+            written += len(getattr(piece, "data", b""))
 
         for index, sentence in enumerate(sentences):
             if cancel is not None and cancel.is_set():
@@ -244,17 +313,23 @@ class Narrator:
             try:
                 clip = engine.synthesize(sentence.ja, rate=rate, voice=voice)
             except TTSError as exc:
-                warnings.append(f"第 {index + 1} 句合成失败：{exc}")
+                # A broken voice fails identically on every sentence; saying so
+                # once is information, saying it 40 times is noise.
+                reason = f"{engine.name}合成失败：{exc}"
+                if reason not in warnings:
+                    warnings.append(reason)
+                if not pieces and index >= _GIVE_UP_AFTER:
+                    break
                 continue
             if clip is None or clip.is_empty:
                 continue
 
-            start = elapsed
+            start, offset = elapsed, written
             for repeat in range(repeats):
                 push(clip)
                 if repeat < repeats - 1:
                     push(silence_like(clip, self.settings.sentence_pause_ms // 2))
-            timings.append(SentenceTiming(index, start, elapsed))
+            timings.append(SentenceTiming(index, start, elapsed, offset))
 
             gap = (
                 self.settings.paragraph_pause_ms
@@ -267,7 +342,10 @@ class Narrator:
                 progress(index + 1, total)
 
         if not pieces:
-            warnings.append("没有生成任何音频，请检查语音引擎设置。")
+            # Only add the generic line when nothing more specific was recorded;
+            # "check your engine settings" is useless next to a real reason.
+            if not warnings:
+                warnings.append("没有生成任何音频，请检查语音引擎设置。")
             return NarrationResult(None, engine.id, engine.name, warnings)
 
         try:

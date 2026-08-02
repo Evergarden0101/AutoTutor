@@ -41,6 +41,7 @@ adds extra sources.
 | **Pick the length you want** | Four targets — about **1, 2, 4 or 8 minutes** of narration. The composer keeps adding material, with spoken transitions, until it reaches the target. |
 | **Clear narration → MP3** | Offline Open JTalk voice, Windows system voices, or Microsoft Edge neural voices. The voice picker sits right above the lesson; speed, pauses and repeats are in the settings. |
 | **Follow along while it reads** | The sentence being spoken is marked with a ▶ in the gutter and highlighted, and the status bar shows `第 3 / 17 句　00:16 / 02:17` with a progress bar. |
+| **Start from any sentence** | Click the ▶ next to a sentence to begin reading there — no re-synthesis, no scrubbing. Useful for drilling the one line you keep mishearing. |
 | **Truly offline** | The voice model and dictionary are bundled *inside* the executable. No account, no API key, no download on first run. |
 | **Six online sources** | Podcast episode notes, YouTube captions, NHK News Web Easy, NHK news feeds, Wikinews and Wikipedia — pick which ones to use in **设置 → 搜索来源**. |
 
@@ -94,7 +95,7 @@ include Tk; on Debian/Ubuntu run `sudo apt install python3-tk`.
 5. **内容来源** — see [Content sources](#content-sources) below.
 6. Press **生成课文** (or `Ctrl+G`). The text appears immediately and the audio is
    synthesised in the background.
-7. **▶ 播放** (`Ctrl+P`) reads it aloud, marking and highlighting the sentence being spoken and showing elapsed/total time.
+7. **▶ 播放** (`Ctrl+P`) reads it aloud, marking and highlighting the sentence being spoken and showing elapsed/total time. Click the **▶** beside any sentence to start from there instead.
 8. **导出…** (`Ctrl+E`) writes the MP3 and study materials wherever you want.
 
 The **注音显示** row switches between furigana, `漢字(かんじ)`, plain kanji and kana-only —
@@ -103,7 +104,9 @@ useful for testing yourself: listen first with the kanji hidden, then reveal.
 **朗读语音**, directly above the lesson, switches voice without opening the settings. It
 lists every voice from every available engine — the bundled offline voice first, then the
 online neural voices if you have allowed networking. Changing it discards the rendered
-audio so the next **▶ 播放** uses the voice you can see.
+audio so the next **▶ 播放** uses the voice you can see. The online list is fetched from
+Microsoft on startup rather than hardcoded, so a voice that is retired stops being
+offered instead of failing at play time.
 
 ---
 
@@ -245,11 +248,20 @@ disagree about what "casual" means. Corpus passages carry an explicit tag, and a
 fails if a tag stops matching what the text actually reads like.
 
 **Length.** Narration speed was measured against the bundled voice at 6.9 kana/second, so
-a target duration converts directly into an amount of text. The offline composer widens
-its search in a fixed order — more passages on the topic, then neighbouring levels of the
-same topic, then a related topic — and says in the lesson notes whenever it had to step
-outside the level you asked for. The online search grows its window and merges further
-articles the same way.
+a target duration converts directly into an amount of text.
+
+**Staying coherent.** A lesson should be a talk, not a montage. Whole passages are always
+used before loose example sentences, which are a last resort and disclosed when they
+happen. Every topic ships a conversational retelling of its polite passage, so the
+composer measures how much vocabulary two passages share and refuses to play both — you
+should not hear about だし twice in four minutes. Transitions are drawn without
+replacement so a long lesson does not say 続いて、別の角度から three times, and widening
+only kicks in for a real shortfall rather than the last few seconds.
+
+Online, the same principle decides which article wins: a source long enough to carry the
+whole lesson beats a closer-level fragment, worth about one JLPT level in the ranking. If
+one source genuinely cannot fill the time, the next episode of the *same* programme is
+tried before an unrelated one, and the lesson notes say which it was.
 
 *Honest limitation:* surface statistics barely separate N2 from N1 — both score around
 4.3. Treat the estimate as a ranking signal, not a verdict.

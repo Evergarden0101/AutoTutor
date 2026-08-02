@@ -18,6 +18,8 @@ from autotutor.export import (
 from autotutor.models import GenerationRequest, Lesson, RubySegment, Sentence
 from autotutor.tts import (
     Narrator,
+    NarrationResult,
+    TTSError,
     SentenceTiming,
     apply_voice_choice,
     available_engines,
@@ -25,6 +27,7 @@ from autotutor.tts import (
     get_engine,
     list_voice_choices,
 )
+from autotutor.tts.edge import KNOWN_VOICES, EdgeEngine
 from autotutor.tts.audio import (
     Mp3Clip,
     PcmClip,
@@ -133,6 +136,230 @@ class TestEngines:
 
     def test_offline_filter_excludes_network_engines(self):
         assert all(not e.requires_network for e in available_engines(allow_online=False))
+
+
+class TestEdgeVoices:
+    """Guards the bug where the picker offered voices Edge does not serve."""
+
+    def test_shipped_catalogue_is_only_what_edge_actually_serves(self):
+        """Azure has more Japanese voices; the free read-aloud endpoint does not.
+
+        Offering ja-JP-AoiNeural and friends made switching voice fail with
+        "No audio was received. Please verify that your parameters are
+        correct." Do not re-add one without hearing it play.
+        """
+        assert [v.id for v in KNOWN_VOICES] == [
+            "ja-JP-NanamiNeural", "ja-JP-KeitaNeural",
+        ]
+
+    def test_every_shipped_voice_is_labelled(self):
+        for voice in KNOWN_VOICES:
+            assert voice.id.startswith("ja-JP-") and voice.name and voice.gender
+
+    def test_voices_never_blocks_on_the_network(self, monkeypatch):
+        engine = get_engine("edge")
+
+        def explode(*args, **kwargs):
+            raise AssertionError("voices() must not call the service")
+
+        monkeypatch.setattr(engine, "refresh", explode)
+        assert engine.voices()
+
+    def test_refresh_replaces_the_shipped_list(self, monkeypatch):
+        engine = EdgeEngine()
+        monkeypatch.setattr(engine, "_module", _StubEdgeModule([
+            {"ShortName": "ja-JP-NanamiNeural", "Locale": "ja-JP", "Gender": "Female",
+             "FriendlyName": "Microsoft Nanami Online (Natural) - Japanese (Japan)"},
+            {"ShortName": "ja-JP-NewVoiceNeural", "Locale": "ja-JP", "Gender": "Male",
+             "FriendlyName": "Microsoft NewVoice Online (Natural) - Japanese (Japan)"},
+            {"ShortName": "en-US-JennyNeural", "Locale": "en-US", "Gender": "Female",
+             "FriendlyName": "Microsoft Jenny Online (Natural) - English (US)"},
+        ]))
+        assert engine.refresh() is True
+        ids = [v.id for v in engine.voices()]
+        assert ids == ["ja-JP-NanamiNeural", "ja-JP-NewVoiceNeural"]
+        assert engine.voices()[0].name == "Nanami"
+        assert engine.voices()[0].gender == "女性"
+
+    def test_refresh_keeps_the_shipped_list_when_the_service_is_unreachable(self):
+        engine = EdgeEngine()
+        engine._module = _StubEdgeModule(None)
+        assert engine.refresh() is False
+        assert [v.id for v in engine.voices()] == [v.id for v in KNOWN_VOICES]
+
+    def test_refresh_ignores_a_response_with_no_japanese(self):
+        engine = EdgeEngine()
+        engine._module = _StubEdgeModule([
+            {"ShortName": "en-US-JennyNeural", "Locale": "en-US", "Gender": "Female"},
+        ])
+        assert engine.refresh() is False
+        assert [v.id for v in engine.voices()] == [v.id for v in KNOWN_VOICES]
+
+    def test_a_retired_voice_gets_an_actionable_message(self):
+        """An empty stream means the voice is gone, not that the network is down."""
+        engine = EdgeEngine()
+        engine._module = _StubEdgeModule([], audio=b"")
+        with pytest.raises(TTSError) as exc:
+            engine.synthesize("こんにちは。", voice="ja-JP-GoneNeural")
+        message = str(exc.value)
+        assert "ja-JP-GoneNeural" in message
+        assert "朗读语音" in message
+        assert "网络" not in message
+
+    def test_a_network_failure_still_says_network(self):
+        engine = EdgeEngine()
+        engine._module = _StubEdgeModule([], error=OSError("connection refused"))
+        with pytest.raises(TTSError) as exc:
+            engine.synthesize("こんにちは。", voice="ja-JP-NanamiNeural")
+        assert "网络" in str(exc.value)
+
+
+class _StubEdgeModule:
+    """Stands in for edge_tts without touching the network."""
+
+    def __init__(self, voices, audio: bytes = b"stub-mp3", error=None):
+        self._voices = voices
+        self._audio = audio
+        self._error = error
+
+    async def list_voices(self):
+        if self._voices is None:
+            raise OSError("unreachable")
+        return self._voices
+
+    def Communicate(self, text, voice, rate="+0%"):  # noqa: N802 - mirrors edge_tts
+        return _StubCommunicate(self._audio, self._error)
+
+
+class _StubCommunicate:
+    def __init__(self, audio: bytes, error):
+        self._audio = audio
+        self._error = error
+
+    async def stream(self):
+        if self._error is not None:
+            raise self._error
+        if self._audio:
+            yield {"type": "audio", "data": self._audio}
+
+
+class TestNarrationFallback:
+    """Silence is never an acceptable outcome (see gotcha #8)."""
+
+    def test_a_dead_online_engine_falls_back_to_offline(self, settings, lesson):
+        if not get_engine("openjtalk").available():
+            pytest.skip("pyopenjtalk not installed")
+        settings.allow_online = True
+        settings.tts_engine = "edge"
+        edge = get_engine("edge")
+        if not edge.available():
+            pytest.skip("edge-tts not installed")
+        original = edge._module
+        edge._module = _StubEdgeModule([], audio=b"")
+        try:
+            result = Narrator(settings).narrate(lesson)
+        finally:
+            edge._module = original
+        assert result.clip is not None
+        assert result.engine_id == "openjtalk"
+        assert any("已改用" in w for w in result.warnings)
+
+    def test_the_reason_is_reported_once_not_per_sentence(self, settings, lesson):
+        edge = get_engine("edge")
+        if not edge.available():
+            pytest.skip("edge-tts not installed")
+        settings.allow_online = True
+        settings.tts_engine = "edge"
+        original = edge._module
+        edge._module = _StubEdgeModule([], audio=b"")
+        try:
+            result = Narrator(settings).narrate(lesson)
+        finally:
+            edge._module = original
+        retired = [w for w in result.warnings if "停用" in w]
+        assert len(retired) == 1, result.warnings
+
+    def test_no_generic_advice_when_a_real_reason_exists(self, settings, lesson):
+        edge = get_engine("edge")
+        if not edge.available():
+            pytest.skip("edge-tts not installed")
+        settings.allow_online = False   # no offline fallback path to take
+        settings.tts_engine = "edge"
+        original = edge._module
+        edge._module = _StubEdgeModule([], audio=b"")
+        try:
+            result = Narrator(settings).narrate(lesson)
+        finally:
+            edge._module = original
+        assert not any("请检查语音引擎设置" in w for w in result.warnings)
+
+
+class TestSeeking:
+    """"Play from this sentence" - byte offsets into the concatenated clip."""
+
+    def _result(self, clips, gap=b"\x00\x00"):
+        """A narration of three fake sentences with a gap after each."""
+        pieces, timings, offset, elapsed = [], [], 0, 0.0
+        for index, data in enumerate(clips):
+            clip = PcmClip(data, 16000)
+            timings.append(SentenceTiming(index, elapsed, elapsed + clip.duration, offset))
+            pieces.append(clip)
+            offset += len(data) + len(gap)
+            elapsed += clip.duration + PcmClip(gap, 16000).duration
+            pieces.append(PcmClip(gap, 16000))
+        return NarrationResult(concat(pieces), "openjtalk", "test", timings=timings)
+
+    def test_offset_zero_returns_the_whole_clip(self):
+        result = self._result([b"\x01\x02" * 10, b"\x03\x04" * 10])
+        assert result.clip_from(0).data == result.clip.data
+
+    def test_later_sentence_starts_at_its_own_bytes(self):
+        first, second = b"\x01\x01" * 10, b"\x02\x02" * 10
+        result = self._result([first, second])
+        assert result.clip_from(1).data.startswith(second)
+
+    def test_seeking_preserves_the_container(self):
+        result = self._result([b"\x01\x01" * 10, b"\x02\x02" * 10])
+        part = result.clip_from(1)
+        assert isinstance(part, PcmClip)
+        assert part.sample_rate == result.clip.sample_rate
+
+    def test_an_index_past_the_end_does_not_explode(self):
+        result = self._result([b"\x01\x01" * 10])
+        assert result.clip_from(99) is not None
+
+    def test_a_negative_index_plays_from_the_start(self):
+        result = self._result([b"\x01\x01" * 10, b"\x02\x02" * 10])
+        assert result.clip_from(-1).data == result.clip.data
+
+    def test_starts_at_matches_the_timing(self):
+        result = self._result([b"\x01\x01" * 100, b"\x02\x02" * 100])
+        assert result.starts_at(1) == pytest.approx(result.timings[1].start)
+        assert result.starts_at(0) == 0.0
+
+    def test_no_clip_means_nothing_to_seek(self):
+        assert NarrationResult(None).clip_from(2) is None
+        assert NarrationResult(None).can_seek is False
+
+    def test_mp3_can_seek_even_without_timings_in_seconds(self):
+        """concat() joins MP3 byte for byte, so offsets are exact there too."""
+        first, second = b"\xff\xfb" + b"a" * 40, b"\xff\xfb" + b"b" * 40
+        clip = Mp3Clip(first + second)
+        timings = [SentenceTiming(0, 0.0, 0.0, 0), SentenceTiming(1, 0.0, 0.0, len(first))]
+        result = NarrationResult(clip, "edge", "Edge", timings=timings)
+        assert result.has_timings is False   # seconds are unknown for MP3
+        assert result.can_seek is True
+        assert result.clip_from(1).data == second
+
+    @pytest.mark.skipif(
+        not get_engine("openjtalk").available(), reason="pyopenjtalk not installed"
+    )
+    def test_offsets_line_up_with_real_audio(self, settings, lesson):
+        result = Narrator(settings).narrate(lesson)
+        for timing in result.timings:
+            part = result.clip_from(timing.index)
+            expected = result.duration - timing.start
+            assert part.duration == pytest.approx(expected, abs=0.05), timing.index
 
 
 class TestVoicePicker:

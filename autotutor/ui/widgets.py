@@ -96,10 +96,14 @@ class LessonView(ScrollingText):
         super().__init__(master, palette, fonts, wrap="char")
         self.mode = MODE_RUBY
         self.show_translation = True
+        # Called with a sentence index when the learner clicks its ▶.
+        self.on_play_from: Optional[Callable[[int], None]] = None
         self._sentence_ranges: Dict[int, tuple] = {}
         self._cursor_ranges: Dict[int, tuple] = {}
         self._highlighted: Optional[int] = None
+        self._hovered: Optional[int] = None
         self._configure_tags()
+        self._bind_start_buttons()
 
     def _configure_tags(self) -> None:
         palette, fonts = self.palette, self.fonts
@@ -159,9 +163,65 @@ class LessonView(ScrollingText):
         self.text.tag_configure(
             "highlight", background=palette.select,
         )
+        # The per-sentence start button. It reuses the cursor glyph and the
+        # sentence number rather than inserting a widget: the highlight tracks
+        # character ranges, and anything inserted later would shift them.
+        self.text.tag_configure("start_hot", background=palette.select)
         self.text.tag_raise("highlight")
         self.text.tag_raise("ruby")
         self.text.tag_raise("cursor_on")
+        self.text.tag_raise("start_hot")
+
+    def _bind_start_buttons(self) -> None:
+        """Make each sentence's ▶ behave like a button.
+
+        Bound once on the tag rather than per sentence, so re-rendering a
+        lesson does not accumulate handlers.
+        """
+        self.text.tag_bind("start", "<Button-1>", self._on_start_click)
+        self.text.tag_bind("start", "<Enter>", self._on_start_enter)
+        self.text.tag_bind("start", "<Leave>", self._on_start_leave)
+        self.text.tag_bind("start", "<Motion>", self._on_start_enter)
+
+    def _index_at(self, event) -> Optional[int]:
+        position = self.text.index(f"@{event.x},{event.y}")
+        for index, (start, end) in self._cursor_ranges.items():
+            if self.text.compare(start, "<=", position) and self.text.compare(
+                position, "<", end
+            ):
+                return index
+        return None
+
+    def _on_start_click(self, event):
+        index = self._index_at(event)
+        if index is not None and self.on_play_from:
+            self.on_play_from(index)
+        return "break"
+
+    def _on_start_enter(self, event):
+        index = self._index_at(event)
+        if index == self._hovered:
+            return
+        self._clear_hover()
+        self._hovered = index
+        if index is None:
+            return
+        self.text.configure(cursor="hand2")
+        span = self._cursor_ranges.get(index)
+        if span:
+            self.text.tag_add("start_hot", span[0], span[1])
+
+    def _on_start_leave(self, _event=None):
+        self._clear_hover()
+        self.text.configure(cursor="")
+
+    def _clear_hover(self) -> None:
+        if self._hovered is None:
+            return
+        span = self._cursor_ranges.get(self._hovered)
+        if span:
+            self.text.tag_remove("start_hot", span[0], span[1])
+        self._hovered = None
 
     def refresh_style(self, palette: Palette, fonts: Fonts) -> None:
         self.palette, self.fonts = palette, fonts
@@ -176,12 +236,14 @@ class LessonView(ScrollingText):
         self.clear()
         self._sentence_ranges.clear()
         self._cursor_ranges.clear()
+        self._hovered = None
         self.write(message, "meta")
 
     def show_lesson(self, lesson: Optional[Lesson]) -> None:
         self.clear()
         self._sentence_ranges.clear()
         self._cursor_ranges.clear()
+        self._hovered = None
         self._highlighted = None
         if lesson is None:
             return
@@ -202,9 +264,10 @@ class LessonView(ScrollingText):
         for index, sentence in enumerate(lesson.sentences):
             start = self.text.index("end-1c")
             cursor_start = start
-            self.write(PLAY_CURSOR, "cursor_off")
+            # "start" marks the clickable zone; the cursor tags colour it.
+            self.write(PLAY_CURSOR, "cursor_off", "start")
+            self.write(f"{index + 1:>2}. ", "num", "start")
             self._cursor_ranges[index] = (cursor_start, self.text.index("end-1c"))
-            self.write(f"{index + 1:>2}. ", "num")
             self._write_sentence(sentence)
             self.write("\n")
             if self.show_translation and sentence.zh:

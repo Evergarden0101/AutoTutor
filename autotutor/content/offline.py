@@ -21,9 +21,10 @@ sounds like two different speakers spliced together.
 from __future__ import annotations
 
 import random
+import re
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, List, Optional, Sequence, Tuple
 
 from ..models import (
     REGISTER_AUTO,
@@ -52,6 +53,25 @@ from .corpus import (
 _RECENT_LIMIT = 24
 
 Pair = Tuple[str, str]
+
+_COMPOUND_RE = re.compile(r"[一-鿿]{2,}")
+# Measured over the bundled corpus: unrelated passages on the same topic share
+# almost nothing (median 0.00, p90 0.15), while the conversational retelling of
+# a passage overlaps its polite twin at 0.32-0.39. Anything above this is the
+# same story told twice, which is the opposite of a lesson that develops.
+_OVERLAP_LIMIT = 0.25
+# Close enough to the target that widening would cost more than it gains.
+_CLOSE_ENOUGH = 0.9
+
+
+def _topic_terms(pairs: Sequence[Pair]) -> set:
+    """The multi-kanji compounds a block is about."""
+    return set(_COMPOUND_RE.findall("".join(ja for ja, _ in pairs)))
+
+
+def _overlap(left: set, right: set) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
 
 
 @dataclass
@@ -173,11 +193,25 @@ class OfflineGenerator:
         topic: Optional[Topic],
         title: str,
         register: str = REGISTER_NEUTRAL,
+        used: Optional[set] = None,
     ) -> Optional[Pair]:
         options = frame_sentences("transitions", level, register)
         if not options:
             return None
+        # Without replacement: a long lesson has ten seams, and hearing
+        # 続いて、別の角度から… three times is worse than hearing it once. When
+        # the pool runs out, start again but never straight back onto the line
+        # that was just used.
+        if used is not None:
+            fresh = [o for o in options if o.get("ja") not in used]
+            if not fresh:
+                last = next(reversed(list(used)), None) if used else None
+                used.clear()
+                fresh = [o for o in options if o.get("ja") != last] or options
+            options = fresh
         chosen = self.rng.choice(options)
+        if used is not None:
+            used.add(chosen.get("ja"))
         name_ja = topic.name_ja if topic else "この話題"
         name_zh = topic.name_zh if topic else "这个话题"
         ja = (chosen.get("ja", "")
@@ -220,11 +254,25 @@ class OfflineGenerator:
         blocks: List[_Block] = []
         total = 0.0
 
+        covered: List[set] = []
+        # Widening costs the learner something - a level warning, or material
+        # from another topic - so it is only worth it for a real shortfall.
+        # Anything above this is inside the tolerance _trim_to_budget allows,
+        # and the extra block would mostly be trimmed away again.
+        enough = budget * _CLOSE_ENOUGH
+
         def take(candidates: List[_Block], mark_transition: bool) -> None:
             nonlocal total
             for block in candidates:
                 if total >= budget:
                     return
+                # Every topic has a conversational retelling of its polite
+                # passage. Playing both means saying the same thing twice, so
+                # whichever the register preference picked first wins.
+                terms = _topic_terms(block.pairs)
+                if any(_overlap(terms, seen) > _OVERLAP_LIMIT for seen in covered):
+                    continue
+                covered.append(terms)
                 if block.title_ja:
                     used.add(self._key(block.topic_id, Passage(
                         block.level, block.title_ja, block.title_zh, [])))
@@ -244,14 +292,9 @@ class OfflineGenerator:
         ))
         take(preferred, mark_transition=True)
 
-        # 2. Loose sentences at the requested level.
-        if total < budget:
-            extras = self._extras_block(corpus, level)
-            if extras:
-                take([extras], mark_transition=False)
-
-        # 3. Neighbouring levels of the same topic.
-        if total < budget:
+        # 2. Neighbouring levels of the same topic - still whole passages, so
+        #    the lesson keeps reading as connected prose.
+        if total < enough:
             stepped_out = False
             for candidate_level in nearest_levels(level)[1:]:
                 if total >= budget:
@@ -260,19 +303,14 @@ class OfflineGenerator:
                 if more:
                     stepped_out = True
                     take(more, mark_transition=True)
-                if total < budget:
-                    extras = self._extras_block(corpus, candidate_level)
-                    if extras:
-                        stepped_out = True
-                        take([extras], mark_transition=False)
             if stepped_out:
                 warnings.append(
                     f"所选长度超出了「{level}」级别在这个主题下的语料量，"
                     "已补充相邻级别的同主题内容。想要严格贴合级别，请选择更短的长度。"
                 )
 
-        # 4. A different topic, same level.
-        if total < budget:
+        # 3. A different topic, same level.
+        if total < enough:
             others = [t for t in available_topic_ids() if t != corpus.id]
             self.rng.shuffle(others)
             added_topics: List[str] = []
@@ -291,6 +329,24 @@ class OfflineGenerator:
                     (TOPICS[t].name_zh if t in TOPICS else t) for t in added_topics[:3]
                 )
                 warnings.append(f"为了达到所选时长，课文后半段加入了其他主题：{names}。")
+
+        # 4. Loose sentences, last of all. `extras` are single facts joined by
+        #    connectives - useful padding, but they read as a list rather than
+        #    a paragraph, so every whole passage is tried before them.
+        if total < enough:
+            used_extras = False
+            for candidate_level in nearest_levels(level):
+                if total >= budget:
+                    break
+                extras = self._extras_block(corpus, candidate_level)
+                if extras:
+                    used_extras = True
+                    take([extras], mark_transition=False)
+            if used_extras:
+                warnings.append(
+                    "内置课文不足以填满所选时长，结尾补充了一些独立的例句。"
+                    "想要完整连贯的段落，请选择更短的长度。"
+                )
 
         return blocks
 
@@ -341,11 +397,13 @@ class OfflineGenerator:
         closer = self._frame("closers", level, topic, spoken)
 
         body: List[Pair] = []
+        seen_transitions: set = set()
         for block in blocks:
             if block.needs_transition:
                 block_topic = TOPICS.get(block.topic_id, topic)
                 transition = self._transition(
-                    level, block_topic, block.title_ja, block.register
+                    level, block_topic, block.title_ja, block.register,
+                    used=seen_transitions,
                 )
                 if transition:
                     body.append(transition)

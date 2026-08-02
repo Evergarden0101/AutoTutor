@@ -336,9 +336,9 @@ def _feed_articles(
         if query:
             matched = [e for e in entries if query in e["title"] + e["summary"]]
             entries = matched or entries
-        for entry in entries:
+        for entry in _substantial_first(entries):
             body = "\n".join(part for part in (entry["title"], entry["summary"]) if part)
-            if len(body) < 40:
+            if len(body) < _MIN_ENTRY_CHARS:
                 continue
             articles.append(
                 Article(
@@ -355,6 +355,28 @@ def _feed_articles(
     if not articles:
         raise SourceError("；".join(errors[:2]) or "没有取到内容。")
     return articles
+
+
+# Below this an entry is a headline, not something you can listen to.
+_MIN_ENTRY_CHARS = 40
+# An episode note this long can carry a lesson by itself, which is what makes
+# the result a continuous piece of speech rather than a montage of blurbs.
+_SUBSTANTIAL_CHARS = 200
+
+
+def _substantial_first(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Entries that can stand alone first, the rest after, order preserved.
+
+    Not a plain sort by length: within each group the feed's own order is kept
+    so the newest episode still wins ties, and a feed of uniformly short notes
+    is degraded rather than rejected.
+    """
+    def size(entry: Dict[str, str]) -> int:
+        return len(entry.get("title", "")) + len(entry.get("summary", ""))
+
+    big = [e for e in entries if size(e) >= _SUBSTANTIAL_CHARS]
+    small = [e for e in entries if size(e) < _SUBSTANTIAL_CHARS]
+    return big + small
 
 
 def fetch_podcasts(query: str = "", timeout: int = 20, limit: int = 4) -> List[Article]:

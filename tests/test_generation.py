@@ -6,6 +6,7 @@ import pytest
 
 from autotutor.config import Settings
 from autotutor.content import generate_lesson
+from autotutor.content.corpus import frame_sentences, load_topic
 from autotutor.content.offline import OfflineGenerator
 from autotutor.content.online import (
     best_window,
@@ -33,6 +34,7 @@ from autotutor.models import (
     GenerationRequest,
     target_seconds,
 )
+from autotutor.levels import LEVEL_CODES
 from autotutor.topics import CUSTOM_TOPIC, RANDOM_TOPIC, TOPIC_IDS
 
 
@@ -123,7 +125,11 @@ class TestOfflineGeneration:
             offline_settings,
         )
         assert lesson.topic == "hospital"
-        assert not lesson.warnings
+        # An exact topic match must not claim it substituted something. Other
+        # warnings (level widening, for instance) are a separate concern.
+        assert not any("已改用最接近的内置主题" in w for w in lesson.warnings), (
+            lesson.warnings
+        )
 
     def test_unknown_custom_topic_warns_and_falls_back(self, offline_settings):
         lesson = generate_lesson(
@@ -147,6 +153,126 @@ class TestOfflineGeneration:
             offline_settings,
         )
         assert lesson.estimated_seconds > 5
+
+
+class TestPassageCoherence:
+    """A lesson should read as connected prose, not a list of stray facts."""
+
+    def _blocks(self, level="N4", topic="daily_life", budget=240.0, register="auto"):
+        generator = OfflineGenerator()
+        warnings = []
+        blocks = generator._collect_blocks(
+            load_topic(topic), level, budget, warnings, register,
+        )
+        return blocks, warnings
+
+    def test_whole_passages_are_used_before_loose_sentences(self):
+        """`extras` are single facts glued with それから - a last resort.
+
+        They used to be taken second, ahead of real passages from neighbouring
+        levels, so a medium lesson turned listy long before it had to.
+        """
+        blocks, _ = self._blocks(budget=240.0)
+        titled = [i for i, b in enumerate(blocks) if b.title_ja]
+        loose = [i for i, b in enumerate(blocks) if not b.title_ja]
+        assert titled, "expected at least one whole passage"
+        if loose:
+            assert min(loose) > max(titled), (
+                "loose sentences must come after every whole passage"
+            )
+
+    def test_a_short_lesson_is_whole_passages_only(self):
+        """At the short preset there is no excuse for stray sentences."""
+        blocks, warnings = self._blocks(budget=60.0)
+        assert blocks and all(b.title_ja for b in blocks)
+        assert not warnings
+
+    def test_padding_with_loose_sentences_is_disclosed(self):
+        """Whatever the composer had to do to fill the time, it says so."""
+        blocks, warnings = self._blocks(budget=100000.0)
+        if any(not b.title_ja for b in blocks):
+            assert any("例句" in w for w in warnings), warnings
+
+    def test_the_same_story_is_not_told_twice(self):
+        """Every topic has a casual retelling of its polite passage.
+
+        Playing both means the learner hears about だし twice in one lesson -
+        once in です・ます and once in 常体 - which is padding, not development.
+        """
+        from autotutor.content.offline import _overlap, _topic_terms
+
+        blocks, _ = self._blocks(level="N3", topic="food", budget=240.0)
+        terms = [_topic_terms(b.pairs) for b in blocks]
+        for i in range(len(terms)):
+            for j in range(i + 1, len(terms)):
+                assert _overlap(terms[i], terms[j]) <= 0.25, (
+                    f"blocks {i} and {j} cover the same ground: "
+                    f"{blocks[i].title_ja} / {blocks[j].title_ja}"
+                )
+
+    @pytest.mark.parametrize("topic_id", TOPIC_IDS)
+    def test_no_topic_repeats_itself_at_any_length(self, offline_settings, topic_id):
+        from autotutor.content.offline import _overlap, _topic_terms
+
+        blocks, _ = self._blocks(level="N4", topic=topic_id, budget=450.0)
+        terms = [_topic_terms(b.pairs) for b in blocks]
+        worst = max(
+            (_overlap(terms[i], terms[j])
+             for i in range(len(terms)) for j in range(i + 1, len(terms))),
+            default=0.0,
+        )
+        assert worst <= 0.25, f"{topic_id}: {worst:.2f}"
+
+    def test_overlap_is_symmetric_and_bounded(self):
+        from autotutor.content.offline import _overlap
+
+        assert _overlap(set(), set()) == 0.0
+        assert _overlap({"料理"}, {"料理"}) == 1.0
+        assert _overlap({"料理"}, {"天気"}) == 0.0
+        assert _overlap({"a", "b"}, {"b", "c"}) == _overlap({"b", "c"}, {"a", "b"})
+
+    @pytest.mark.parametrize("length", LENGTH_IDS)
+    def test_a_lesson_never_ends_on_a_stray_fragment(self, offline_settings, length):
+        lesson = generate_lesson(
+            GenerationRequest(level="N4", topic="travel", length=length, seed=4),
+            offline_settings,
+        )
+        assert lesson.sentences[-1].ja.endswith(("。", "！", "？"))
+
+    @pytest.mark.parametrize("topic_id", ["food", "travel", "anime"])
+    def test_passage_content_is_never_replayed(self, offline_settings, topic_id):
+        """Widening must not serve a passage the lesson already used.
+
+        Transitions are drawn from a small shared pool and may recur in a very
+        long lesson; the material itself may not.
+        """
+        lesson = generate_lesson(
+            GenerationRequest(level="N3", topic=topic_id, length="xlong", seed=8),
+            offline_settings,
+        )
+        transitions = {
+            item["ja"]
+            for level in LEVEL_CODES
+            for item in frame_sentences("transitions", level)
+            + frame_sentences("transitions", level, "spoken")
+        }
+        body = [s.ja for s in lesson.sentences if s.ja not in transitions]
+        duplicates = {s for s in body if body.count(s) > 1}
+        assert not duplicates, duplicates
+
+    def test_a_transition_never_follows_itself(self, offline_settings):
+        """Back-to-back repeats are what a listener actually notices."""
+        lesson = generate_lesson(
+            GenerationRequest(level="N3", topic="food", length="xlong", seed=8),
+            offline_settings,
+        )
+        japanese = [s.ja for s in lesson.sentences]
+        assert all(a != b for a, b in zip(japanese, japanese[1:]))
+
+    def test_the_transition_pool_is_bigger_than_a_handful(self):
+        """Three lines across ten seams guarantees hearing one three times."""
+        for level in LEVEL_CODES:
+            assert len(frame_sentences("transitions", level)) >= 5, level
 
 
 class TestOfflineRegister:
@@ -206,9 +332,29 @@ class TestOfflineRegister:
         assert not opener.startswith("みなさん")
         assert colloquial_score(opener) >= 0.5
 
-    def test_spoken_above_n3_falls_back_and_says_so(self, offline_settings):
-        lesson = self._lesson(offline_settings, REGISTER_SPOKEN, level="N1")
-        assert any("口语" in w for w in lesson.warnings)
+    @pytest.mark.parametrize("level", ["N2", "N1"])
+    def test_spoken_above_n3_either_delivers_or_explains(self, offline_settings, level):
+        """No silent substitution: conversational material, or a reason.
+
+        There are no conversational passages above N3, so the composer either
+        widens to a neighbouring level that has some - which is a level warning,
+        not a register one - or falls back to polite Japanese and says so.
+        """
+        lesson = self._lesson(offline_settings, REGISTER_SPOKEN, level=level)
+        delivered = colloquial_score(lesson.plain_text) > 0.5
+        assert delivered or lesson.warnings, lesson.plain_text[:80]
+        if not delivered:
+            assert any("口语" in w for w in lesson.warnings), lesson.warnings
+
+    def test_neutral_filler_does_not_out_vote_the_passages(self):
+        """です・ます extras suit either request, so they abstain from the vote."""
+        from autotutor.content.offline import _Block, _effective_register
+
+        casual = _Block(pairs=[("今日は寝坊しちゃった。", "")], register="spoken")
+        filler = _Block(pairs=[("私は毎朝六時に起きます。", "")] * 5, register="neutral")
+        assert _effective_register([casual, filler]) == "spoken"
+        assert _effective_register([filler]) == "neutral"
+        assert _effective_register([]) == "neutral"
 
     def test_auto_does_not_warn(self, offline_settings):
         lesson = self._lesson(offline_settings, "auto", level="N1")
@@ -390,6 +536,27 @@ class TestFeedParsing:
 
     def test_respects_the_limit(self):
         assert len(parse_feed(self.RSS, limit=1)) == 1
+
+    def test_substantial_entries_are_offered_first(self):
+        """A one-line blurb cannot carry a lesson; a real episode note can."""
+        from autotutor.content.sources import _substantial_first
+
+        short = {"title": "短い", "summary": "ひとこと。"}
+        long = {"title": "長い", "summary": "あ" * 300}
+        assert _substantial_first([short, long]) == [long, short]
+
+    def test_order_is_kept_within_each_group(self):
+        from autotutor.content.sources import _substantial_first
+
+        a = {"title": "A", "summary": "あ" * 300}
+        b = {"title": "B", "summary": "い" * 300}
+        assert _substantial_first([a, b]) == [a, b]
+
+    def test_a_feed_of_short_notes_is_degraded_not_rejected(self):
+        from autotutor.content.sources import _substantial_first
+
+        entries = [{"title": "A", "summary": "短い。"}, {"title": "B", "summary": "短い。"}]
+        assert _substantial_first(entries) == entries
 
     def test_malformed_feed_raises_source_error(self):
         with pytest.raises(SourceError):
@@ -591,6 +758,117 @@ class TestOnlineGeneratorWithStubs:
         )
         assert "ウィキペディア" in lesson.source_label
         assert any("语体" in w for w in lesson.warnings)
+
+    def test_a_source_that_can_carry_the_lesson_wins(self, stubbed, monkeypatch):
+        """One continuous text beats a closer-level fragment.
+
+        Listening practice is a continuous piece of speech; four unrelated
+        snippets stitched to hit the duration is not what anyone asked for.
+        """
+        from autotutor.content import sources as sources_module
+
+        long_text = "".join(
+            f"日本語の勉強を続けるのは、思っているよりも大変なことだと思います{n}。"
+            for n in range(40)
+        )
+        def short(query="", timeout=20, limit=4):
+            return [Article(title="短い記事", text=FORMAL_TEXT, url="u1",
+                            source_label="短", source_id="wikipedia",
+                            register=REGISTER_WRITTEN)]
+
+        def long(query="", timeout=20, limit=4):
+            return [Article(title="長い記事", text=long_text, url="u2",
+                            source_label="長", source_id="nhk_news",
+                            register=REGISTER_WRITTEN)]
+
+        patched = [
+            sources_module.Source(
+                s.id, s.label_zh, s.register,
+                {"wikipedia": short, "nhk_news": long}.get(
+                    s.id, lambda *a, **k: (_ for _ in ()).throw(SourceError("x"))
+                ),
+                s.best_levels, s.note_zh,
+            )
+            for s in sources_module.SOURCES
+        ]
+        monkeypatch.setattr(sources_module, "SOURCES", patched)
+
+        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+            self._request(level="N3", length="long", register=REGISTER_WRITTEN)
+        )
+        assert lesson.source_label == "長"
+        assert not any("合并" in w for w in lesson.warnings)
+
+    def test_merging_prefers_the_same_source(self, stubbed, monkeypatch):
+        """Extend a podcast with the same programme, not with a news feed."""
+        from autotutor.content import sources as sources_module
+
+        def two_episodes(query="", timeout=20, limit=4):
+            return [
+                Article(title="第10回", text=CASUAL_TEXT, url="a",
+                        source_label="テスト番組", source_id="podcast",
+                        register=REGISTER_SPOKEN),
+                Article(title="第11回", text=CASUAL_TEXT, url="b",
+                        source_label="テスト番組", source_id="podcast",
+                        register=REGISTER_SPOKEN),
+            ]
+
+        def news(query="", timeout=20, limit=4):
+            return [Article(title="ニュース", text=FORMAL_TEXT, url="c",
+                            source_label="NHK", source_id="nhk_news",
+                            register=REGISTER_WRITTEN)]
+
+        patched = [
+            sources_module.Source(
+                s.id, s.label_zh, s.register,
+                {"podcast": two_episodes, "nhk_news": news}.get(
+                    s.id, lambda *a, **k: (_ for _ in ()).throw(SourceError("x"))
+                ),
+                s.best_levels, s.note_zh,
+            )
+            for s in sources_module.SOURCES
+        ]
+        monkeypatch.setattr(sources_module, "SOURCES", patched)
+
+        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+            self._request(length="long", register=REGISTER_SPOKEN)
+        )
+        assert lesson.source_label == "テスト番組"
+        merged = [w for w in lesson.warnings if "接续" in w or "合并" in w]
+        assert merged, lesson.warnings
+        # The other episode of the same programme is used up before reaching
+        # for an unrelated news item.
+        assert merged[0].index("第11回") < merged[0].index("ニュース"), merged[0]
+
+    def test_merging_within_one_source_says_so(self, stubbed, monkeypatch):
+        from autotutor.content import sources as sources_module
+
+        def two_episodes(query="", timeout=20, limit=4):
+            return [
+                Article(title="第10回", text=CASUAL_TEXT, url="a",
+                        source_label="テスト番組", source_id="podcast",
+                        register=REGISTER_SPOKEN),
+                Article(title="第11回", text=CASUAL_TEXT, url="b",
+                        source_label="テスト番組", source_id="podcast",
+                        register=REGISTER_SPOKEN),
+            ]
+
+        patched = [
+            sources_module.Source(
+                s.id, s.label_zh, s.register,
+                two_episodes if s.id == "podcast"
+                else (lambda *a, **k: (_ for _ in ()).throw(SourceError("x"))),
+                s.best_levels, s.note_zh,
+            )
+            for s in sources_module.SOURCES
+        ]
+        monkeypatch.setattr(sources_module, "SOURCES", patched)
+
+        lesson = stubbed.OnlineGenerator(self._settings()).generate(
+            self._request(length="long", register=REGISTER_SPOKEN)
+        )
+        merged = [w for w in lesson.warnings if "接续" in w]
+        assert merged and "同一来源" in merged[0], lesson.warnings
 
     def test_web_text_is_annotated(self, stubbed):
         lesson = stubbed.OnlineGenerator(self._settings()).generate(self._request())

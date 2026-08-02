@@ -135,6 +135,20 @@ def _article_register_cost(article: Article, window: Sequence[str], register: st
     return declared + _register_penalty("".join(window), register) * _REGISTER_COST
 
 
+# Also worth about one JLPT level. A single continuous text is the whole point
+# of listening practice; stitching four unrelated fragments together to hit the
+# duration produces something no one would ever actually listen to.
+_COVERAGE_COST = 0.8
+
+
+def _coverage_cost(window: Sequence[str], target: float) -> float:
+    """How far this source falls short of carrying the lesson on its own."""
+    if target <= 0:
+        return 0.0
+    covered = min(1.0, estimate_seconds(list(window)) / target)
+    return (1.0 - covered) * _COVERAGE_COST
+
+
 # --------------------------------------------------------------------------
 # Level-aware window selection
 # --------------------------------------------------------------------------
@@ -271,30 +285,44 @@ class OnlineGenerator:
                 sentences, request.level, target, request.register
             )
             if window:
-                cost = distance + _article_register_cost(article, window, request.register)
+                cost = (
+                    distance
+                    + _article_register_cost(article, window, request.register)
+                    + _coverage_cost(window, target)
+                )
                 candidates.append((article, window, distance, cost))
 
         if not candidates:
             raise OnlineError("搜到的内容无法拆成合适的句子，请换一个主题或来源再试。")
 
-        # Ranked on level *and* register: sorting on level alone would throw
-        # away the source ordering, and an encyclopedia article is almost
-        # always closer to N2 than a podcast note is.
+        # Ranked on level, register *and* whether one source can carry the whole
+        # lesson. Sorting on level alone gives a montage of fragments: the point
+        # of listening practice is a continuous piece of speech, so a text long
+        # enough to stand on its own is worth about a level of difficulty miss.
         candidates.sort(key=lambda item: item[3])
         article, window, distance, _ = candidates[0]
 
-        # A single article is often too short for the longer presets; keep
-        # pulling in the next-closest ones until the target is reached.
+        # Only if one source truly cannot fill the time. Same source first, so
+        # a podcast is extended with the same programme rather than a news feed.
         extra_sources: List[Article] = []
-        for other, other_window, _, _cost in candidates[1:]:
+        rest = sorted(
+            candidates[1:],
+            key=lambda item: (item[0].source_id != article.source_id, item[3]),
+        )
+        for other, other_window, _, _cost in rest:
             if estimate_seconds(window) >= target:
                 break
             window = window + other_window
             extra_sources.append(other)
         if extra_sources:
+            same = all(a.source_id == article.source_id for a in extra_sources)
             titles = "、".join(a.title for a in extra_sources[:3] if a.title)
             if titles:
-                warnings.append(f"为了达到所选时长，课文还合并了：{titles}。")
+                warnings.append(
+                    ("为了达到所选时长，课文接续了同一来源的其他内容：" if same
+                     else "为了达到所选时长，课文还合并了其他来源：") + titles + "。"
+                    "想要一段完整连贯的内容，可以选择更短的时长。"
+                )
 
         estimated = sum(score_text(s) for s in window) / len(window)
         if distance > _LEVEL_GAP_WARNING:
